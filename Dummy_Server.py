@@ -132,7 +132,7 @@ class DroneHandler:
 
 TCP_PORT = 7000
 CAR_PORT = 6003
-uav_ids = ["04", "06", "07", "08"]
+uav_ids = ["04", "06", "07", "08", "09"]
 handlers: List[DroneHandler] = []
 
 
@@ -181,7 +181,7 @@ log("DUMMY SERVER READY! :)")
 async def TCP_parent():
     async with trio.open_nursery() as nursery:
         nursery.start_soon(trio.serve_tcp, establish_drone_handler, TCP_PORT)
-        nursery.start_soon(trio.serve_tcp, alert_car, CAR_PORT)
+        # nursery.start_soon(trio.serve_tcp, alert_car, CAR_PORT)
 
 
 # trio.run(trio.serve_tcp, establish_drone_handler, TCP_PORT)

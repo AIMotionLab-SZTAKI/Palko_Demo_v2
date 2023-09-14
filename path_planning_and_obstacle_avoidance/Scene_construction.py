@@ -1,4 +1,5 @@
 import cProfile
+import os
 import pstats
 from typing import List, Dict
 
@@ -26,6 +27,14 @@ def construction(drone_IDs: List[str], scene: Construction):
     The static obstacles can be given virtually or scanned with Optitrack.
     !!! The dimensions have to be set up manually either way at Classes -> Static_obstacles !!!
     """
+
+    # Check if the directories made to contain generated files are exists. If not make them.
+    dir_path = os.path.join(os.getcwd(), "path_planning_and_obstacle_avoidance")
+    if not os.path.exists(dir_path + "/Pickle_saves"):
+        os.mkdir(dir_path + "/Pickle_saves")
+    if not os.path.exists(dir_path + "/Pickle_saves/Construction_saves"):
+        os.mkdir(dir_path + "/Pickle_saves/Construction_saves")
+
 # ======================================================================================================================
     # DIMENSIONS OF THE  FLYING ARENA
     plot_arena(scene.dimensions)
@@ -122,13 +131,6 @@ def construction(drone_IDs: List[str], scene: Construction):
 
 # ======================================================================================================================
     # SAVES
-
-    # Check if the directories made to contain generrated files are exists. If not make them.
-    dir_path = os.getcwd()
-    if not os.path.exists(dir_path + "/Pickle_saves"):
-        os.mkdir(dir_path + "/Pickle_saves")
-    if not os.path.exists(dir_path + "/Pickle_saves/Construction_saves"):
-        os.mkdir(dir_path + "/Pickle_saves/Construction_saves")
 
     pickle_save(dir_path+"/Pickle_saves/Construction_saves/number_of_targets.pickle", len(V_fix))
     pickle_save(dir_path+"/Pickle_saves/Construction_saves/base_graph.pickle", {'graph': base_graph,

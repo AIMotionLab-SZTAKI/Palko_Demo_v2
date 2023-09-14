@@ -8,20 +8,22 @@ if platform.system() == "Windows":
 elif platform.system() == "Linux":
     server = subprocess.Popen(["x-terminal-emulator", "-e", "python3", "Dummy_Server.py"])
 
-time.sleep(0.5)
-
-print(f"Starting dummy drone...")
-if platform.system() == "Windows":
-    car = subprocess.Popen(["start", "cmd", "/K", "python3",  "car_sender.py"], shell=True)
-elif platform.system() == "Linux":
-    car = subprocess.Popen(["x-terminal-emulator", "-e", "python3", "car_sender.py"])
-
-time.sleep(2)
+time.sleep(1)
 print(f"Starting demo...")
 if platform.system() == "Windows":
     client = subprocess.Popen(["start", "cmd", "/K", "python3",  "Demo.py"], shell=True)
 elif platform.system() == "Linux":
     client = subprocess.Popen(["x-terminal-emulator", "-e", "python3", "Demo.py"])
+
+time.sleep(2)
+
+print(f"Starting car sender...")
+if platform.system() == "Windows":
+    car = subprocess.Popen(["start", "cmd", "/K", "python3",  "car_sender.py"], shell=True)
+elif platform.system() == "Linux":
+    car = subprocess.Popen(["x-terminal-emulator", "-e", "python3", "car_sender.py"])
+
+
 
 
 # time.sleep(12)

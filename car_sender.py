@@ -1,43 +1,43 @@
 import socket
 import time
 import traceback
+import os
+import pickle
 
 ip = "127.0.0.1"
 demo_port = 6001
-dummy_server_port = 6003
-skybrush_server_port = 6002
+skybrush_port = 6002
 
 
-def send_traj(traj_num: int):
-    client_socket = socket.socket()
-    print(f"Connecting to demo...")
-    client_socket.connect((ip, demo_port))
-    print(f"Connected to demo!")
-    client_socket.sendall(f"{traj_num}EOF".encode("utf-8"))
-    print(f"Sent traj!")
-    client_socket.close()
-
-client_socket = socket.socket()
+car_timings = []
+with open(os.path.join(os.getcwd(), "city_demo_all_paths_tuple.pkl"), 'rb') as f:
+    while True:
+        try:
+            car_data = pickle.load(f)
+            car_timings.append(car_data[0][0][-1]/abs(car_data[1]))
+        except EOFError:
+            break
+MODE=None
+start_delay = 0
 try:
-    client_socket.connect((ip, skybrush_server_port))
-    print(f"Connected to skybrush server!")
-except:
-    client_socket.connect((ip, dummy_server_port))
-    print(f"Connected to dummy server!")
-wait_time = int(client_socket.recv(1024))
-print(f"Got {wait_time}s wait time.")
-try:
-    time.sleep(wait_time)
-    send_traj(0)
-    time.sleep(7)
-    send_traj(1)
-    time.sleep(7)
-    send_traj(2)
-    time.sleep(7)
-    send_traj(3)
-    time.sleep(7)
-    send_traj(4)
-except Exception as exc:
-    print(f"Exception: {exc!r}. TRACEBACK:\n")
-    print(traceback.format_exc())
+    Socket = socket.socket()
+    Socket.connect((ip, demo_port))
+    MODE = "DEMO"
+    print(f"Ready to start in {MODE} mode.")
+    start_delay = float(Socket.recv(1024).strip())
+except ConnectionRefusedError:
+    Socket = socket.socket()
+    Socket.connect((ip, skybrush_port))
+    MODE = "SHOW"
+    print(f"Ready to start in {MODE} mode.")
+    start_delay=float(Socket.recv(1024).strip())
+print(f"Waiting {start_delay} to launch!")
+time.sleep(start_delay)
+print(f"Starting trajectories.")
+if MODE == "DEMO":
+    for i, delay in enumerate(car_timings):
+        Socket.sendall(f"{i}EOF".encode("utf-8"))
+        print(f"Sent traj {i}.")
+        time.sleep(delay+1)
+
 input("Press Enter to exit...")

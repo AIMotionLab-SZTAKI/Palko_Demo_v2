@@ -428,7 +428,7 @@ class DroneHandler:
         await self.send_and_ack(f"CMDSTART_start_{traj_type}_EOF".encode())
         self.save_traj()
         if self.return_to_home:
-            await self.move_to_next_command(next_callable=self.land, duration=SETTINGS.get("TAKEOFF_TIME"))
+            await self.move_to_next_command(next_callable=self.land, duration=SETTINGS.get("TAKEOFF_DURATION"))
         else:
             await self.move_to_next_command(next_callable=self.calculate_upload, duration=SETTINGS.get("REST_TIME"))
 
@@ -436,7 +436,7 @@ class DroneHandler:
         """Handles a land command, however, the next command is None since the demo is supposed to be over."""
         self.print(f"Got land command.")
         await self.send_and_ack(f"CMDSTART_land_EOF".encode())
-        await self.move_to_next_command(next_callable=None, duration=SETTINGS.get("TAKEOFF_TIME"))
+        await self.move_to_next_command(next_callable=None, duration=SETTINGS.get("TAKEOFF_DURATION"))
 
     async def do_commands(self):
         """This is the 'main' function for a handler: it runs in an infinite loop, calling the callable parts of the
@@ -578,13 +578,19 @@ def setup_scene(simulated_drones_start: List[np.ndarray]) -> Tuple[Construction,
                          real_obstacles=SETTINGS.get("real_obstacles"),
                          simulated_obstacles=SETTINGS.get("simulated_obstacles"),
                          get_new_measurement=SETTINGS.get("new_measurement"))
+    if SETTINGS.get("LIVE_DEMO"):
+        assert scene.real_drones
+        assert scene.real_obstacles
+
     if scene.get_new_measurement:
         # we can't have a new measurement without real obstacles: what are we measuring then?
         assert scene.real_obstacles
+
     if scene.real_drones:
         # we have to make sure that we check for real obstacles while using real drones, else we may fly
         # into a building
         assert scene.real_obstacles
+
     else:
         # if we intend to use simulated (not real) drones, we must provide their starting positions
         scene.simulated_drones_start = simulated_drones_start
@@ -713,9 +719,8 @@ def initialize_drones(scene: Construction, graph: Dict, demo_start_time) -> List
     return drones
 
 
-async def get_handlers(drones: List[Drone]) -> Dict[str, DroneHandler]:
+async def get_handlers(handlers: Dict[str, Union[DroneHandler, None]], drones: List[Drone]) -> Dict[str, DroneHandler]:
     """Function that creates the drone handlers, and puts them in a dictionary with the IDs as keys."""
-    handlers: Dict[str, DroneHandler] = {}
     for idx, drone in enumerate(drones):
         other_drones = [element for element in drones if element != drone]
         # run the initialization, where we establish a TCP socket for each drone
@@ -770,85 +775,106 @@ async def dummy_drone_handler(stream: trio.SocketStream,
 
 
 async def car_handler(stream: trio.SocketStream,
-                              handlers: Dict[str, DroneHandler],
-                              drones: List[Drone],
-                              dynamic_obstacles: List[Dynamic_obstacle]):
+                      handlers: Dict[str, DroneHandler],
+                      dynamic_obstacles: List[Dynamic_obstacle],
+                      car_ready: Event,
+                      takeoff: Event):
     """Function that handles the communication with the car, calculates whether a collision is about to occur, then
     instructs the handlers to calculate an emergency maneuver if necessary."""
     print(f"[{display_time():.3f}] TCP connection to car handler made.")
-    car_start_time = current_time() + SETTINGS.get("EMERGENCY_TIME")
     car_safety_distance = SETTINGS.get("car_safety_distance")
-    try:
-        # data may get transmitted in several packages, so keep reading until we find end of file
-        data: bytes = b""
-        while not data.endswith(b"EOF") and data is not None:
-            data += await stream.receive_some()
-            print(f"Received {data}")
-        data = data[:-len(b"EOF")]
-        traj_num = data.decode("utf-8")
-        with open(os.path.join(os.getcwd(), SETTINGS.get("car_folder_name"), traj_num), 'rb') as file:
-            tck, speed = pickle.load(file)
-
-        car = Dynamic_obstacle(path_tck=tck, path_length=tck[0][-1], speed=abs(speed), radius=SETTINGS.get("car_radius"),
-                               start_time=car_start_time)
-        print(f"CAR PATH LENGTH: {car.path_length}")
-        add_coll_matrix_to_poles(obstacles=[car], graph_dict=graph, Ts=scene.Ts, cmin=scene.cmin,
-                                 cmax=scene.cmax, safety_distance=car_safety_distance)
-        dynamic_obstacles.clear()
-        dynamic_obstacles.append(car)
-        collision_ids = check_collisions_with_single_obstacle(new_obstacle=car, drones=drones,
-                                                              Ts=scene.Ts, safety_distance=car_safety_distance)
-        if len(collision_ids) > 0:
-            warning(f"[{display_time():.3f}] For car trajectory {traj_num}, collisions were detected with the following"
-                    f" drone(s): {collision_ids}. Their emergency trajectories should start in "
-                    f"{SETTINGS.get('EMERGENCY_TIME')}")
-        else:
-            warning(f"[{display_time():.3f}] For car trajectory {traj_num}, no collisions were detected.")
-        emergency_calculate_over = current_time() + SETTINGS.get("EMERGENCY_TIME")
-        for id in collision_ids:
-            handler = handlers[id]
-            # instead of whatever the next command was going to be, do an emergency calculation
-            handler.next_command = DroneCommand(handler.emergency_calc_upload, emergency_calculate_over)
-            # wake up from the sleep in-between the commands
-            handler.interrupt.set()
-    except Exception as exc:
-        print(f"[{display_time():.3f}] TCP connection to car handler crashed with exception: {exc!r}. TRACEBACK:\n")
-        print(traceback.format_exc())
+    car_ready.set()
+    await takeoff.wait()
+    await stream.send_all(b'4')
+    while True:
+        try:
+            # data may get transmitted in several packages, so keep reading until we find end of file
+            data: bytes = b""
+            while not data.endswith(b"EOF"):
+                data += await stream.receive_some()
+            data = data[:-len(b"EOF")]
+            traj_num = data.decode("utf-8")
+            with open(os.path.join(os.getcwd(), SETTINGS.get("car_folder_name"), traj_num), 'rb') as file:
+                tck, speed = pickle.load(file)
+            car_start_time = current_time() + SETTINGS.get("EMERGENCY_TIME")
+            car = Dynamic_obstacle(path_tck=tck, path_length=tck[0][-1], speed=abs(speed), radius=SETTINGS.get("car_radius"),
+                                   start_time=car_start_time)
+            print(f"CAR PATH LENGTH: {car.path_length}")
+            add_coll_matrix_to_poles(obstacles=[car], graph_dict=graph, Ts=scene.Ts, cmin=scene.cmin,
+                                     cmax=scene.cmax, safety_distance=car_safety_distance)
+            dynamic_obstacles.clear()
+            dynamic_obstacles.append(car)
+            drones = [handler.drone for handler in handlers.values()]
+            collision_ids = check_collisions_with_single_obstacle(new_obstacle=car, drones=drones,
+                                                                  Ts=scene.Ts, safety_distance=car_safety_distance)
+            if len(collision_ids) > 0:
+                warning(f"[{display_time():.3f}] For car trajectory {traj_num}, collisions were detected with the following"
+                        f" drone(s): {collision_ids}. Their emergency trajectories should start in "
+                        f"{SETTINGS.get('EMERGENCY_TIME')}")
+            else:
+                warning(f"[{display_time():.3f}] For car trajectory {traj_num}, no collisions were detected.")
+            for id in collision_ids:
+                handler = handlers[id]
+                # instead of whatever the next command was going to be, do an emergency calculation
+                handler.next_command = DroneCommand(handler.emergency_calc_upload, car_start_time)
+                # wake up from the sleep in-between the commands
+                handler.interrupt.set()
+        except Exception as exc:
+            print(f"[{display_time():.3f}] TCP connection to car handler crashed with exception: {exc!r}. TRACEBACK:\n")
+            print(traceback.format_exc())
+            break
     print(f"[{display_time():.3f}] Closing TCP connection")
+
+
+async def serve_tcp_cancelscope(handler_func: Callable, port: int, scope: trio.CancelScope):
+    with scope:
+        await trio.serve_tcp(handler_func, port)
 
 async def demo():
     print(f"Welcome to Palkovits Máté's drone demo++!")
-    display_time.start_time = current_time()  # reset display time to 0
-    demo_start_time = current_time() + SETTINGS.get("TAKEOFF_TIME")  # this is when the first trajectory is started
-    drones = initialize_drones(scene, graph, demo_start_time)
-    handlers = await get_handlers(drones)
-
+    takeoff = Event()
+    car_tcp_scope = trio.CancelScope()
     async with trio.open_nursery() as nursery:
+        handlers: Dict[str, Union[DroneHandler, None]] = {}
+        if SETTINGS.get("CAR"):
+            car_ready = Event()
+            handler_func = partial(car_handler, handlers=handlers,  dynamic_obstacles=dynamic_obstacles, car_ready=car_ready, takeoff=takeoff)
+            nursery.start_soon(serve_tcp_cancelscope, handler_func, SETTINGS.get("CAR_PORT"), car_tcp_scope)
+            print(f"Waiting for car!!!!")
+            await car_ready.wait()
+        takeoff_time = current_time() + 1  # leave 1 second for initial calculations, so they don't delay takeoff
+        demo_start_time = takeoff_time + SETTINGS.get("TAKEOFF_DURATION")  # this is when the first trajectory is started
+        drones = initialize_drones(scene, graph, demo_start_time)
+        handlers = await get_handlers(handlers, drones)
+        await sleep_until(takeoff_time)
+        takeoff.set()
+        display_time.start_time = current_time()  # reset display time to 0
         for ID, handler in handlers.items():
             await handler.send_and_ack(f"CMDSTART_upload_{handler.trajectory}_EOF".encode())  # upload the first trajectory before starting the demo
             handler.next_command = DroneCommand(handler.takeoff, demo_start_time)  # once that's done, take off
             nursery.start_soon(handler.do_commands)  # and start the infinite loop that executes commands
-        with trio.move_on_at(demo_start_time + SETTINGS.get("demo_time")):
-            await trio.serve_tcp(partial(car_handler, handlers=handlers, drones=drones,
-                                         dynamic_obstacles=dynamic_obstacles), SETTINGS.get("CAR_PORT"))
+        await sleep_until(demo_start_time + SETTINGS.get("demo_time"))
+        car_tcp_scope.cancel()
+
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
 SETTINGS = {
-    "drone_IDs": ["06", "07", "04"],
-    "random_seed": 100158,
+    "drone_IDs": ["04", "07", "09"],
+    "random_seed": 113128,
     "LIVE_DEMO": False,
     "demo_time": 40,
     "REST_TIME": 2,
-    "TAKEOFF_TIME": 3,
+    "TAKEOFF_DURATION": 3,
     "traj_type": "COMPRESSED",
     "absolute_traj": True,
-    "new_measurement": False,
+    "new_measurement": False, # TODO: !new_meas && real_drones -> maybe auto-detect starting position?
     "real_obstacles": True,
     "real_drones": False,
     "simulated_obstacles": False,
     "SERVER_PORT": 6000,
     "DUMMY_SERVER_PORT": 7000,
     "CAR_PORT": 6001,
+    "CAR": True,
     "equidistant_knots": False,
     "simulated_start": [np.array([1.25, 0, 0]),
                         np.array([0.75, -1.25, 0]),
@@ -870,7 +896,7 @@ SETTINGS = {
 
 scene, graph, static_obstacles = setup_demo()
 dynamic_obstacles = []
-plt.show()
+# plt.show()
 try:
     trio.run(demo)
 except Exception as exc:
