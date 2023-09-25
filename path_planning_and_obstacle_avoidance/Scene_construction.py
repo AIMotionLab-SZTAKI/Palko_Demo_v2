@@ -238,6 +238,14 @@ def select_fix_vertex_set(index_of_verex_set: int) -> np.ndarray:
     elif index_of_verex_set == 4:
         # CAR DEMO
         V_fix = [[1.4,-1.3, 0.5],[-1.35, 0.7, 0.7], [-0.75, 1.35, 0.7], [-0.35, 0, 1.2]]
+    elif index_of_verex_set == 5:
+        inner_xy = 0.4
+        outer_xy = 3 * inner_xy
+        high_layer = 0.5
+        V_fix = [[-inner_xy, -outer_xy, high_layer], [inner_xy, -outer_xy, high_layer],
+                 [-inner_xy, outer_xy, high_layer], [-outer_xy, -outer_xy, high_layer],
+                 [-outer_xy, outer_xy, high_layer], [inner_xy, outer_xy, high_layer],
+                 [-outer_xy, 0, high_layer], [-inner_xy, 0, high_layer], [inner_xy, 0, high_layer]]
     else:
         return np.array([])
     return np.array(V_fix)

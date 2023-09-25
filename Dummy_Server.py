@@ -88,7 +88,7 @@ class DroneHandler:
         await self.handle_transmission()
         trajectory_data = json.loads(self.traj.decode('utf-8'))
         f"Defined trajectory of length {trajectory_data.get('landingTime')} sec for drone {self.uav_id}"
-        await sleep(0.01)
+        await sleep(0.5)
         await self.stream.send_all(b'ACK')  # reply with an acknowledgement
 
     async def start(self, arg: bytes):

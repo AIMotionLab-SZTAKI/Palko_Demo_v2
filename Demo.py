@@ -470,7 +470,7 @@ def splines_to_json(spline_path: List[Union[np.ndarray, List[np.ndarray], int]],
     if traj_type == 'COMPRESSED':
         degree = 3
         granularity = 1001
-        num_of_segments = 40
+        num_of_segments = 20
     elif traj_type == 'POLY4D':
         degree = 5
         granularity = 1001
@@ -577,7 +577,8 @@ def setup_scene(simulated_drones_start: List[np.ndarray]) -> Tuple[Construction,
     scene = Construction(real_drones=SETTINGS.get("real_drones"),
                          real_obstacles=SETTINGS.get("real_obstacles"),
                          simulated_obstacles=SETTINGS.get("simulated_obstacles"),
-                         get_new_measurement=SETTINGS.get("new_measurement"))
+                         get_new_measurement=SETTINGS.get("new_measurement"),
+                         fix_vertex_layout=SETTINGS.get("fix_vertex_layout"))
     if SETTINGS.get("LIVE_DEMO"):
         assert scene.real_drones
         assert scene.real_obstacles
@@ -850,36 +851,38 @@ async def demo():
         takeoff.set()
         display_time.start_time = current_time()  # reset display time to 0
         for ID, handler in handlers.items():
-            await handler.send_and_ack(f"CMDSTART_upload_{handler.trajectory}_EOF".encode())  # upload the first trajectory before starting the demo
             handler.next_command = DroneCommand(handler.takeoff, demo_start_time)  # once that's done, take off
             nursery.start_soon(handler.do_commands)  # and start the infinite loop that executes commands
+        await sleep_until(takeoff_time+0.5) # synchronisation point
+        for handler in handlers.values():
+            await handler.send_and_ack(f"CMDSTART_upload_{handler.trajectory}_EOF".encode())  # upload the first trajectory before starting the demo
         await sleep_until(demo_start_time + SETTINGS.get("demo_time"))
         car_tcp_scope.cancel()
 
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
 SETTINGS = {
-    "drone_IDs": ["04", "07", "09"],
-    "random_seed": 113128,
-    "LIVE_DEMO": False,
+    "drone_IDs": ["04", "07", "08", "09"],
+    "random_seed": 11810,
+    "LIVE_DEMO": True,
     "demo_time": 40,
-    "REST_TIME": 2,
-    "TAKEOFF_DURATION": 3,
+    "REST_TIME": 3,
+    "TAKEOFF_DURATION": 4,
     "traj_type": "COMPRESSED",
     "absolute_traj": True,
-    "new_measurement": False, # TODO: !new_meas && real_drones -> maybe auto-detect starting position?
+    "new_measurement": True, # TODO: !new_meas && real_drones -> maybe auto-detect starting position?
     "real_obstacles": True,
-    "real_drones": False,
+    "real_drones": True,
     "simulated_obstacles": False,
     "SERVER_PORT": 6000,
     "DUMMY_SERVER_PORT": 7000,
     "CAR_PORT": 6001,
-    "CAR": True,
+    "CAR": False,
     "equidistant_knots": False,
     "simulated_start": [np.array([1.25, 0, 0]),
-                        np.array([0.75, -1.25, 0]),
-                        np.array([1.25, -0.75, 0]),
-                        np.array([0, -1.25, 0]),
+                        np.array([1.25, -0.5, 0]),
+                        np.array([1, -1, 0]),
+                        np.array([0.6, -1.3, 0]),
                         np.array([0, 0, 0])],
     "traj_folder_name": "trajectories",
     "log_folder_name": "logs",
@@ -887,6 +890,7 @@ SETTINGS = {
     "car_radius": 0.15,
     "car_safety_distance": 0.3,
     "EMERGENCY_TIME": 1,
+    "fix_vertex_layout": 5,
     "text_colors": ["\033[92m",
                     "\033[93m",
                     "\033[94m",
@@ -896,7 +900,7 @@ SETTINGS = {
 
 scene, graph, static_obstacles = setup_demo()
 dynamic_obstacles = []
-# plt.show()
+plt.show()
 try:
     trio.run(demo)
 except Exception as exc:

@@ -8,7 +8,8 @@ class Construction:
     Set params in Scene construction
     """
     def __init__(self, real_drones: bool = True, real_obstacles: bool = True,
-                 simulated_obstacles: bool = True, get_new_measurement: bool = True):
+                 simulated_obstacles: bool = True, get_new_measurement: bool = True,
+                 fix_vertex_layout: int = 4):
         # GENERAL PARAMETERS:
 
         # The dimensions of the flying area. (x_min, x_max, y_min, y_max, z_min, z_max)
@@ -34,7 +35,7 @@ class Construction:
         # Do not change the names, just the values. TODO: Makse a guide to how to add more real obstacle types.
         self.real_obstacles_side_lengths = {"buildings": 0.3,
                                             "landing_pads": 0.2,
-                                            "poles": 0.1}
+                                            "poles": 0.2}
         # The distance from the top of the osstacles, where targetponts will be placed
         self.howering_heigt = 0.2
 
@@ -71,7 +72,7 @@ class Construction:
         # Select a predefined layout for the manualy added vertices.
         # (0 or not defined layout number results in an empty space)
         # More layouts can be defined in the Scene_constuction.py.
-        self.fix_vertex_layout = 4
+        self.fix_vertex_layout = fix_vertex_layout
         # The maximum distance between the points in the point cloud of a graph.
         self.point_cloud_density = 0.05
         # The generation of the densed graph can be switched off to reduce the run time of Scene_construction
@@ -164,7 +165,7 @@ class Drone:
     def __init__(self):
         self.cf_id = "00"
         # CHANGEABLE PARAMETERS:
-        self.radius = 0.06
+        self.radius = 0.1
         self.DOWNWASH = 2
         self.constant_speeds = np.array([0.4, 0.5, 0.6])
         self.MAX_ACCELERATION = 0.6
