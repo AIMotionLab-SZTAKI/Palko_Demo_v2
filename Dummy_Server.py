@@ -69,7 +69,6 @@ class DroneHandler:
         await self.tcp_command_dict[cmd](self, arg)
 
     async def takeoff(self, arg: bytes):
-        start.set()
         try:
             arg = float(arg)
             log(f"drone{self.uav_id}: Takeoff command dispatched to drone.")
@@ -129,15 +128,20 @@ class DroneHandler:
                     warning(f"drone{self.uav_id}: TCP handler crashed: {exc!r}")
                     break
 
+async def listen_and_broadcast(stream: trio.SocketStream, *, streams: List[trio.SocketStream]):
+    streams.append(stream)
+    print(f"Number of connections on the broadcast port changed to {len(streams)}")
+    data = b''
+    while not data.startswith(b'-1'):
+        data = await stream.receive_some()
+        if len(data) > 0:
+            for target_stream in [other_stream for other_stream in streams if other_stream != stream]:
+                await target_stream.send_all(data)
+    streams.remove(stream)
+    print(f"Number of connections on the broadcast port changed to {len(streams)}")
 
-TCP_PORT = 7000
-CAR_PORT = 6003
-uav_ids = ["04", "06", "07", "08", "09"]
-handlers: List[DroneHandler] = []
 
-
-async def establish_drone_handler(stream: trio.SocketStream):
-    global handlers
+async def establish_drone_handler(stream: trio.SocketStream, *, handlers: List[DroneHandler]):
     taken_ids = [handler.uav_id for handler in handlers]
     available_ids = [drone_id for drone_id in uav_ids if drone_id not in taken_ids]
     if len(available_ids) != 0:
@@ -153,11 +157,11 @@ async def establish_drone_handler(stream: trio.SocketStream):
                 return
             handler = DroneHandler(requested_id, stream)
             handlers.append(handler)
-            log(f"Made handler for drone {requested_id}.")
+            log(f"Made handler for drone {requested_id}. The following drones have handlers: {[handler.uav_id for handler in handlers]}")
             acknowledgement = f"ACK_{requested_id}"
             await stream.send_all(acknowledgement.encode('utf-8'))
             await handler.listen()
-            handlers = [handler for handler in handlers if handler.uav_id != handler.uav_id]
+            handlers.remove(handler)
             log(f"Removing handler for drone {handler.uav_id}. "
                   f"Remaining handlers: {[handler.uav_id for handler in handlers]}")
         else:
@@ -169,20 +173,26 @@ async def establish_drone_handler(stream: trio.SocketStream):
         await stream.send_all(b'ACK_00')
         return
 
-async def alert_car(stream: trio.SocketStream):
-    await start.wait()
-    await stream.send_all(b'4')
-    await trio.sleep(4)
-    print(f"START CAR!!!!")
-
+uav_ids = ["04", "06", "07", "08", "09"]
+handlers: List[DroneHandler] = []
+streams: List[trio.SocketStream] = []
 start_time = time.time()
-start = trio.Event()
 log("DUMMY SERVER READY! :)")
+ports: List[Tuple[int, Callable]] = [(7000, partial(establish_drone_handler, handlers=handlers)),(7001, partial(listen_and_broadcast, streams=streams))]
+
 async def TCP_parent():
     async with trio.open_nursery() as nursery:
-        nursery.start_soon(trio.serve_tcp, establish_drone_handler, TCP_PORT)
-        # nursery.start_soon(trio.serve_tcp, alert_car, CAR_PORT)
-
-
-# trio.run(trio.serve_tcp, establish_drone_handler, TCP_PORT)
+        for port, func in ports:
+            # func is partial(establish_drone_handler, handlers=handlers), with one positional argument: stream
+            serve_tcp = partial(trio.serve_tcp, handler=func, port=port, handler_nursery=nursery)
+            nursery.start_soon(serve_tcp)
+        # start = None
+        # while start!= "start":
+        #     start = await trio.to_thread.run_sync(input, 'Type "start" to start car in 4 seconds!!!\n')
+        # try:
+        #     for stream in streams:
+        #         print("STARTING CAR WROOM WROOM")
+        #         await stream.send_all(b'4')
+        # except Exception as exc:
+        #     print(f"Exception: {exc!r}")
 trio.run(TCP_parent)

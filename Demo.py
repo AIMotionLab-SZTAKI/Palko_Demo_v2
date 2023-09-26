@@ -782,8 +782,12 @@ async def car_handler(stream: trio.SocketStream,
                       takeoff: Event):
     """Function that handles the communication with the car, calculates whether a collision is about to occur, then
     instructs the handlers to calculate an emergency maneuver if necessary."""
-    print(f"[{display_time():.3f}] TCP connection to car handler made.")
+    print(f"[{display_time():.3f}] TCP connection to car handler made. Waiting for init message.")
     car_safety_distance = SETTINGS.get("car_safety_distance")
+    init_message: bytes = b""
+    while init_message != b"ready":
+        init_message = await stream.receive_some()
+    print(f"Got init message!")
     car_ready.set()
     await takeoff.wait()
     await stream.send_all(b'4')
@@ -794,6 +798,8 @@ async def car_handler(stream: trio.SocketStream,
             while not data.endswith(b"EOF"):
                 data += await stream.receive_some()
             data = data[:-len(b"EOF")]
+            if data.startswith(b'-1'):  # this signifies that we had the last trajectory
+                break
             traj_num = data.decode("utf-8")
             with open(os.path.join(os.getcwd(), SETTINGS.get("car_folder_name"), traj_num), 'rb') as file:
                 tck, speed = pickle.load(file)
@@ -825,24 +831,25 @@ async def car_handler(stream: trio.SocketStream,
             print(traceback.format_exc())
             break
     print(f"[{display_time():.3f}] Closing TCP connection")
+    await stream.send_all(b'-1EOF')  # signal for the server-side handler function to stop listening
 
 
-async def serve_tcp_cancelscope(handler_func: Callable, port: int, scope: trio.CancelScope):
-    with scope:
-        await trio.serve_tcp(handler_func, port)
 
 async def demo():
     print(f"Welcome to Palkovits Máté's drone demo++!")
     takeoff = Event()
-    car_tcp_scope = trio.CancelScope()
     async with trio.open_nursery() as nursery:
         handlers: Dict[str, Union[DroneHandler, None]] = {}
         if SETTINGS.get("CAR"):
             car_ready = Event()
-            handler_func = partial(car_handler, handlers=handlers,  dynamic_obstacles=dynamic_obstacles, car_ready=car_ready, takeoff=takeoff)
-            nursery.start_soon(serve_tcp_cancelscope, handler_func, SETTINGS.get("CAR_PORT"), car_tcp_scope)
-            print(f"Waiting for car!!!!")
+            PORT = SETTINGS.get("SERVER_PORT") if SETTINGS.get("LIVE_DEMO") else SETTINGS.get("DUMMY_SERVER_PORT")
+            CAR_PORT = PORT+1
+            car_stream: trio.SocketStream = await trio.open_tcp_stream("127.0.0.1", CAR_PORT)
+            nursery.start_soon(partial(car_handler, stream=car_stream, handlers=handlers,
+                                       dynamic_obstacles=dynamic_obstacles, car_ready=car_ready, takeoff=takeoff))
+            print(f"WAITING FOR CAR!!!!")
             await car_ready.wait()
+
         takeoff_time = current_time() + 1  # leave 1 second for initial calculations, so they don't delay takeoff
         demo_start_time = takeoff_time + SETTINGS.get("TAKEOFF_DURATION")  # this is when the first trajectory is started
         drones = initialize_drones(scene, graph, demo_start_time)
@@ -857,27 +864,26 @@ async def demo():
         for handler in handlers.values():
             await handler.send_and_ack(f"CMDSTART_upload_{handler.trajectory}_EOF".encode())  # upload the first trajectory before starting the demo
         await sleep_until(demo_start_time + SETTINGS.get("demo_time"))
-        car_tcp_scope.cancel()
+
 
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
 SETTINGS = {
-    "drone_IDs": ["04", "07", "08", "09"],
+    "drone_IDs": ["04", "07", "09"],
     "random_seed": 11810,
-    "LIVE_DEMO": True,
+    "LIVE_DEMO": False,
     "demo_time": 40,
     "REST_TIME": 3,
     "TAKEOFF_DURATION": 4,
     "traj_type": "COMPRESSED",
     "absolute_traj": True,
-    "new_measurement": True, # TODO: !new_meas && real_drones -> maybe auto-detect starting position?
+    "new_measurement": False, # TODO: !new_meas && real_drones -> maybe auto-detect starting position?
     "real_obstacles": True,
-    "real_drones": True,
+    "real_drones": False,
     "simulated_obstacles": False,
     "SERVER_PORT": 6000,
     "DUMMY_SERVER_PORT": 7000,
-    "CAR_PORT": 6001,
-    "CAR": False,
+    "CAR": True,
     "equidistant_knots": False,
     "simulated_start": [np.array([1.25, 0, 0]),
                         np.array([1.25, -0.5, 0]),
@@ -890,7 +896,7 @@ SETTINGS = {
     "car_radius": 0.15,
     "car_safety_distance": 0.3,
     "EMERGENCY_TIME": 1,
-    "fix_vertex_layout": 5,
+    "fix_vertex_layout": 4,
     "text_colors": ["\033[92m",
                     "\033[93m",
                     "\033[94m",
@@ -900,7 +906,7 @@ SETTINGS = {
 
 scene, graph, static_obstacles = setup_demo()
 dynamic_obstacles = []
-plt.show()
+# plt.show()
 try:
     trio.run(demo)
 except Exception as exc:

@@ -15,7 +15,7 @@ if platform.system() == "Windows":
 elif platform.system() == "Linux":
     client = subprocess.Popen(["x-terminal-emulator", "-e", "python3", "Demo.py"])
 
-time.sleep(2)
+time.sleep(2.5)
 
 print(f"Starting car sender...")
 if platform.system() == "Windows":
