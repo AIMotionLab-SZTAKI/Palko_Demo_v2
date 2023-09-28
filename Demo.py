@@ -790,7 +790,7 @@ async def car_handler(stream: trio.SocketStream,
     print(f"Got init message!")
     car_ready.set()
     await takeoff.wait()
-    await stream.send_all(b'4')
+    await stream.send_all(b'6')
     while True:
         try:
             # data may get transmitted in several packages, so keep reading until we find end of file
