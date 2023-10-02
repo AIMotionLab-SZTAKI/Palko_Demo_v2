@@ -11,7 +11,7 @@ import json
 from scipy import interpolate
 import numpy as np
 import pickle
-from typing import Tuple, List, Union, Any, cast, Callable, Dict
+from typing import Tuple, List, Union, Any, Callable, Dict, Optional
 import os
 import shutil
 import zipfile
@@ -19,8 +19,36 @@ from functools import partial
 import motioncapture
 from collections import namedtuple
 import traceback
+from queue import Queue
 
 DroneCommand = namedtuple("DroneCommand", ["command", "deadline"])
+
+class SafeFunc:
+    """A class to which we pass a function, making it impossible for asynchronously running processes
+    to call that function before it returns. If this happens, the function call doesn't disappear, instead
+    if will be performed after the call is over via a queue system."""
+    def __init__(self, function: Callable):
+        self.fifo = Queue()
+        self.function: Callable = function
+        self.resource_taken = False
+
+    async def _run_func(self, *args):
+        self.resource_taken = True  # take the resource
+        await self.function(*args)  # do whatever we want
+        if not self.fifo.empty():
+            alert_next: Event = self.fifo.get()
+            alert_next.set()  # signal that the next in the queue is up
+        self.resource_taken = False  # let go of the resource
+
+    async def __call__(self, *args):
+        if not self.resource_taken: # if the resource was free
+            await self._run_func(*args)
+        else: # if the resource was taken
+            up_next = Event()
+            self.fifo.put(up_next) # stand in queue
+            await up_next.wait() # once it's our turn:
+            await sleep(1/200)
+            await self._run_func(*args)
 
 def evaluate_trajectories(drone_IDs: List[str]):
     """Function that takes a look at the saved trajectories, and evaluates them with a certain time interval
@@ -305,6 +333,9 @@ class DroneHandler:
             os.remove(self.log_file_path)
         open(self.log_file_path, 'a').close()
 
+    async def sim_send(self, *args):
+        pass
+
     def print(self, text):
         """Function that we can use instead of the regular pring in the context of a drone handler, to print with
         timestamp, drone annotation, and the drone's color to differentiate between drones. """
@@ -336,8 +367,8 @@ class DroneHandler:
         """Function that sends a message to the server, and waits for a response if necessary."""
         with open(self.log_file_path, 'a') as log:  # note the command to the log file
             log.write(f"{display_time():.3f}: {data}\n")
-
         await self.socket.send_all(data)
+        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
         ack = b""
         while ack != b"ACK":  # wait for a response, if none comes, then this will block the other commands
             ack = await self.socket.receive_some()
@@ -729,51 +760,12 @@ async def get_handlers(handlers: Dict[str, Union[DroneHandler, None]], drones: L
         # designate a TCP socket and an associated handler for each drone
         if socket is not None:
             color = SETTINGS.get("text_colors")[idx]
-            handlers[drone.cf_id] = DroneHandler(socket=socket, drone=drone, other_drones=other_drones, color=color)
+            handler = DroneHandler(socket=socket, drone=drone, other_drones=other_drones, color=color)
+            handlers[drone.cf_id] = handler
         else:
             raise NotImplementedError  # immediately stop if we couldn't reach one of the drones
         await sleep(0.01)
     return handlers
-
-
-async def dummy_drone_handler(stream: trio.SocketStream,
-                              handlers: Dict[str, DroneHandler],
-                              drones: List[Drone],
-                              dynamic_obstacles: List[Dynamic_obstacle]):
-    """Function that handles the communication with the dummy drone, calculates whether a collision is about to occur, then
-    instructs the handlers to calculate an emergency maneuver if necessary."""
-    print(f"[{display_time():.3f}] TCP connection to car handler made.")
-    car_safety_distance = SETTINGS.get("car_safety_distance")
-    try:
-        # data may get transmitted in several packages, so keep reading until we find end of file
-        data: bytes = b""
-        while not data.endswith(b"EOF"):
-            data += await stream.receive_some()
-        data = data[:-len(b"EOF")]
-        # un-serialize the Dynamic_obstacle TODO: don't transmit the whole thing, instead initialize it here
-        dummy_drone: Dynamic_obstacle = pickle.loads(data)
-        dummy_drone.start_time = current_time()  # TODO: synchronisation?
-        add_coll_matrix_to_poles(obstacles=[dummy_drone], graph_dict=graph, Ts=scene.Ts, cmin=scene.cmin,
-                                 cmax=scene.cmax, safety_distance=car_safety_distance)
-        dynamic_obstacles.clear()
-        dynamic_obstacles.append(dummy_drone)
-        collision_ids = check_collisions_with_single_obstacle(new_obstacle=dummy_drone, drones=drones,
-                                                              Ts=scene.Ts, safety_distance=car_safety_distance)
-        if len(collision_ids) > 0:
-            warning(f"[{display_time():.3f}] Collisions detected with the following drone(s): {collision_ids}. "
-                    f"Their emergency trajectories should start in {SETTINGS.get('EMERGENCY_TIME')}")
-        emergency_calculate_over = current_time() + SETTINGS.get("EMERGENCY_TIME")
-        for id in collision_ids:
-            handler = handlers[id]
-            # instead of whatever the next command was going to be, do an emergency calculation
-            handler.next_command = DroneCommand(handler.emergency_calc_upload, emergency_calculate_over)
-            # wake up from the sleep in-between the commands
-            handler.interrupt.set()
-    except Exception as exc:
-        print(f"[{display_time():.3f}] TCP connection to car handler crashed with exception: {exc!r}. TRACEBACK:\n")
-        print(traceback.format_exc())
-    print(f"[{display_time():.3f}] Closing TCP connection")
-
 
 async def car_handler(stream: trio.SocketStream,
                       handlers: Dict[str, DroneHandler],
@@ -794,11 +786,8 @@ async def car_handler(stream: trio.SocketStream,
     while True:
         try:
             # data may get transmitted in several packages, so keep reading until we find end of file
-            data: bytes = b""
-            while not data.endswith(b"EOF"):
-                data += await stream.receive_some()
-            data = data[:-len(b"EOF")]
-            if data.startswith(b'-1'):  # this signifies that we had the last trajectory
+            data: bytes = await stream.receive_some()
+            if not data or data.startswith(b'-1'):
                 break
             traj_num = data.decode("utf-8")
             with open(os.path.join(os.getcwd(), SETTINGS.get("car_folder_name"), traj_num), 'rb') as file:
@@ -806,7 +795,6 @@ async def car_handler(stream: trio.SocketStream,
             car_start_time = current_time() + SETTINGS.get("EMERGENCY_TIME")
             car = Dynamic_obstacle(path_tck=tck, path_length=tck[0][-1], speed=abs(speed), radius=SETTINGS.get("car_radius"),
                                    start_time=car_start_time)
-            print(f"CAR PATH LENGTH: {car.path_length}")
             add_coll_matrix_to_poles(obstacles=[car], graph_dict=graph, Ts=scene.Ts, cmin=scene.cmin,
                                      cmax=scene.cmax, safety_distance=car_safety_distance)
             dynamic_obstacles.clear()
@@ -830,7 +818,7 @@ async def car_handler(stream: trio.SocketStream,
             print(f"[{display_time():.3f}] TCP connection to car handler crashed with exception: {exc!r}. TRACEBACK:\n")
             print(traceback.format_exc())
             break
-    print(f"[{display_time():.3f}] Closing TCP connection")
+    print(f"[{display_time():.3f}] Closing TCP car connection")
     await stream.send_all(b'-1EOF')  # signal for the server-side handler function to stop listening
 
 
@@ -854,6 +842,15 @@ async def demo():
         demo_start_time = takeoff_time + SETTINGS.get("TAKEOFF_DURATION")  # this is when the first trajectory is started
         drones = initialize_drones(scene, graph, demo_start_time)
         handlers = await get_handlers(handlers, drones)
+        # make the simulation connection
+        if SETTINGS.get("SIMULATION", False):
+            PORT = SETTINGS.get("SERVER_PORT") if SETTINGS.get("LIVE_DEMO") else SETTINGS.get("DUMMY_SERVER_PORT")
+            SIM_PORT = PORT + 2
+            sim_stream: trio.SocketStream = await trio.open_tcp_stream("127.0.0.1", SIM_PORT)
+            sim_send = SafeFunc(sim_stream.send_all)
+            for handler in handlers.values():
+                handler.sim_send =sim_send
+
         await sleep_until(takeoff_time)
         takeoff.set()
         display_time.start_time = current_time()  # reset display time to 0
@@ -863,13 +860,11 @@ async def demo():
         await sleep_until(takeoff_time+0.5) # synchronisation point
         for handler in handlers.values():
             await handler.send_and_ack(f"CMDSTART_upload_{handler.trajectory}_EOF".encode())  # upload the first trajectory before starting the demo
-        await sleep_until(demo_start_time + SETTINGS.get("demo_time"))
-
 
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
 SETTINGS = {
-    "drone_IDs": ["04", "07", "09"],
+    "drone_IDs": ["07", "09"],
     "random_seed": 11810,
     "LIVE_DEMO": False,
     "demo_time": 40,
@@ -897,6 +892,7 @@ SETTINGS = {
     "car_safety_distance": 0.3,
     "EMERGENCY_TIME": 1,
     "fix_vertex_layout": 4,
+    "SIMULATION": True,
     "text_colors": ["\033[92m",
                     "\033[93m",
                     "\033[94m",

@@ -17,12 +17,17 @@ def log(text: str):
     print(f"{color}[{time.time() - start_time:.3f} LOG] {text}{reset}")
 
 class DroneHandler:
-    def __init__(self, uav_id: str, stream: trio.SocketStream):
+    def __init__(self, uav_id: str, stream: trio.SocketStream, color):
         self.uav_id = uav_id
         self.stream = stream
         self.transmission_active = False
         self.stream_data = b''
         self.traj = b''
+        self.color = color
+
+    def print(self, text):
+        reset_color = "\033[0m"
+        print(f"{self.color}[drone_{self.uav_id}]: {text}{reset_color}")
 
     def parse(self, raw_data: bytes, ) -> Tuple[Union[bytes, None], Union[bytes, None]]:
         data = raw_data.strip()
@@ -49,7 +54,7 @@ class DroneHandler:
             return False, None
 
     async def handle_transmission(self):
-        log(f"drone{self.uav_id}: Transmission of trajectory started.")
+        self.print(f"drone{self.uav_id}: Transmission of trajectory started.")
         start_index = self.stream_data.find(b'{')
         # If the command was 'upload', then a json file must follow. If it doesn't (we can't find the beginning b'{'),
         # then the command or the file was corrupted.
@@ -62,16 +67,16 @@ class DroneHandler:
                 self.traj += await self.stream.receive_some()  # append the new data to the already received data
             self.traj = self.traj[:-len(b'_EOF')]  # once finished, remove the EOF indicator
             self.transmission_active = False  # then signal that the transmission has ended
-            log(f"drone{self.uav_id}: Transmission of trajectory finished.")
+            self.print(f"drone{self.uav_id}: Transmission of trajectory finished.")
 
     async def command(self, cmd: bytes, arg: bytes):
-        log(f"drone{self.uav_id}: {cmd.decode('utf-8')} command received.")
+        self.print(f"drone{self.uav_id}: {cmd.decode('utf-8')} command received.")
         await self.tcp_command_dict[cmd](self, arg)
 
     async def takeoff(self, arg: bytes):
         try:
             arg = float(arg)
-            log(f"drone{self.uav_id}: Takeoff command dispatched to drone.")
+            self.print(f"drone{self.uav_id}: Takeoff command dispatched to drone.")
             await sleep(0.01)
             await self.stream.send_all(b'ACK')  # reply with an acknowledgement
         except ValueError:
@@ -80,7 +85,7 @@ class DroneHandler:
             warning(f"drone{self.uav_id}: Couldn't take off because of this exception: {exc!r}. ")
 
     async def land(self, arg: bytes):
-        log(f"{self.uav_id}: Land command dispatched..")
+        self.print(f"{self.uav_id}: Land command dispatched..")
         await self.stream.send_all(b'ACK')  # reply with an acknowledgement
 
     async def upload(self, arg: bytes):
@@ -93,11 +98,11 @@ class DroneHandler:
     async def start(self, arg: bytes):
         is_valid, is_relative = self.get_traj_type(self, arg=arg)
         if is_valid:
-            log(f"drone{self.uav_id}: Started {'relative' if is_relative else 'absolute'} trajectory.")
+            self.print(f"drone{self.uav_id}: Started {'relative' if is_relative else 'absolute'} trajectory.")
             await self.stream.send_all(b'ACK')  # reply with an acknowledgement
 
     async def hover(self, arg: bytes):
-        log(f"drone{self.uav_id}: Hover command dispatched.")
+        self.print(f"drone{self.uav_id}: Hover command dispatched.")
         await self.stream.send_all(b'ACK')  # reply with an acknowledgement
 
     tcp_command_dict: Dict[bytes, Callable] = {
@@ -117,7 +122,7 @@ class DroneHandler:
                         break
                     cmd, arg = self.parse(self.stream_data)
                     if cmd == b'NO_CMDSTART':
-                        log(f"{self.uav_id}: Command is missing standard CMDSTART.")
+                        self.print(f"{self.uav_id}: Command is missing standard CMDSTART.")
                         break
                     elif cmd is None:
                         warning(f"{self.uav_id}: None-type command.")
@@ -128,17 +133,22 @@ class DroneHandler:
                     warning(f"drone{self.uav_id}: TCP handler crashed: {exc!r}")
                     break
 
-async def listen_and_broadcast(stream: trio.SocketStream, *, streams: List[trio.SocketStream]):
+async def listen_and_broadcast(stream: trio.SocketStream, *,port: int, streams: List[trio.SocketStream]):
     streams.append(stream)
-    print(f"Number of connections on the broadcast port changed to {len(streams)}")
-    data = b''
-    while not data.startswith(b'-1'):
-        data = await stream.receive_some()
-        if len(data) > 0:
-            for target_stream in [other_stream for other_stream in streams if other_stream != stream]:
-                await target_stream.send_all(data)
+    print(f"Number of connections on port {port} changed to {len(streams)}")
+    while True:
+        try:
+            data = await stream.receive_some()
+            if data:
+                for target_stream in [other_stream for other_stream in streams if other_stream != stream]:
+                    await target_stream.send_all(data)
+            else:
+                break
+        except trio.BrokenResourceError:
+            break
+
     streams.remove(stream)
-    print(f"Number of connections on the broadcast port changed to {len(streams)}")
+    print(f"Number of connections on port {port} changed to {len(streams)}")
 
 
 async def establish_drone_handler(stream: trio.SocketStream, *, handlers: List[DroneHandler]):
@@ -155,7 +165,7 @@ async def establish_drone_handler(stream: trio.SocketStream, *, handlers: List[D
                 warning(f"ID {requested_id} taken already.")
                 await stream.send_all(b'ACK_00')
                 return
-            handler = DroneHandler(requested_id, stream)
+            handler = DroneHandler(requested_id, stream, color=colors[requested_id])
             handlers.append(handler)
             log(f"Made handler for drone {requested_id}. The following drones have handlers: {[handler.uav_id for handler in handlers]}")
             acknowledgement = f"ACK_{requested_id}"
@@ -175,10 +185,19 @@ async def establish_drone_handler(stream: trio.SocketStream, *, handlers: List[D
 
 uav_ids = ["04", "06", "07", "08", "09"]
 handlers: List[DroneHandler] = []
-streams: List[trio.SocketStream] = []
+car_streams: List[trio.SocketStream] = []
+simulation_streams: List[trio.SocketStream] = []
 start_time = time.time()
 log("DUMMY SERVER READY! :)")
-ports: List[Tuple[int, Callable]] = [(7000, partial(establish_drone_handler, handlers=handlers)),(7001, partial(listen_and_broadcast, streams=streams))]
+PORT = 7000
+colors = {"04": "\033[92m",
+          "06": "\033[93m",
+          "07": "\033[94m",
+          "08": "\033[96m",
+          "09": "\033[95m"}
+ports: List[Tuple[int, Callable]] = [(PORT, partial(establish_drone_handler, handlers=handlers)),
+                                     (PORT+1, partial(listen_and_broadcast, port=PORT+1, streams=car_streams)),
+                                     (PORT + 2, partial(listen_and_broadcast, port=PORT+2, streams=simulation_streams))]
 
 async def TCP_parent():
     async with trio.open_nursery() as nursery:
