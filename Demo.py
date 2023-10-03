@@ -311,11 +311,12 @@ def display_time():
 class DroneHandler:
 
     next_command: Union[DroneCommand, None] # which function to call next, and when it has to finish
+    sim_send: Callable
 
     def __init__(self, socket: trio.SocketStream, drone: Drone, other_drones: List[Drone], color: str):
         self.drone = drone
         self.drone_ID = drone.cf_id  # same as the key in the dictionary for the handler
-        self.socket = socket  # used for communication with the handler
+        self.socket: Union[None, trio.SocketStream] = socket  # used for communication with the handler
         self.trajectory: str = splines_to_json(drone.trajectory['spline_path'], drone.trajectory['speed_profile'])
         self.return_to_home = False  # used to signal that the drone's next trajectory will be a RTH maneuver
         self.other_drones = other_drones
@@ -333,8 +334,8 @@ class DroneHandler:
             os.remove(self.log_file_path)
         open(self.log_file_path, 'a').close()
 
-    async def sim_send(self, *args):
-        pass
+    # async def sim_send(self, *args): # gets overwritten with an actual function -> move it from here?
+    #     pass
 
     def print(self, text):
         """Function that we can use instead of the regular pring in the context of a drone handler, to print with
@@ -367,14 +368,17 @@ class DroneHandler:
         """Function that sends a message to the server, and waits for a response if necessary."""
         with open(self.log_file_path, 'a') as log:  # note the command to the log file
             log.write(f"{display_time():.3f}: {data}\n")
-        await self.socket.send_all(data)
-        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
-        ack = b""
-        while ack != b"ACK":  # wait for a response, if none comes, then this will block the other commands
-            ack = await self.socket.receive_some()
-            await sleep(0.01)
+        if self.drone_ID in SETTINGS.get("sim_drones"):
+            await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
+        else:
+            assert self.socket is not None
+            await self.socket.send_all(data)
+            ack = b""
+            while ack != b"ACK":  # wait for a response, if none comes, then this will block the other commands
+                ack = await self.socket.receive_some()
+                await sleep(0.01)
         with open(self.log_file_path, 'a') as log:
-            log.write(f"{display_time():.3f}: {ack}\n")
+            log.write(f"{display_time():.3f}: {b'ACK'}\n")
 
     async def move_to_next_command(self, next_callable: Union[Callable, None], duration: float):
         """Function that prepares the next command in line: it appends the necessary command, and sleeps until the
@@ -587,7 +591,7 @@ async def establish_connection_with_handler(drone_id: str):
         print(f"successfully created server-side handler for drone {drone_id}")
         return drone_stream
     else:
-        return None
+        raise NotImplementedError # immediately stop if we couldn't reach one of the drones
 
 def setup_logs():
     current_dir = os.getcwd()
@@ -603,37 +607,25 @@ def setup_logs():
     os.makedirs(log_folder_path)
 
 
-def setup_scene(simulated_drones_start: List[np.ndarray]) -> Tuple[Construction, Dict, Static_obstacles]:
+def setup_scene() -> Tuple[Construction, Dict, Static_obstacles]:
     """Function that builds the scene and graph for the trajectory generator."""
-    scene = Construction(real_drones=SETTINGS.get("real_drones"),
-                         real_obstacles=SETTINGS.get("real_obstacles"),
+    scene = Construction(real_obstacles = SETTINGS.get("real_obstacles"),
+                         live_demo=SETTINGS.get("LIVE_DEMO"),
                          simulated_obstacles=SETTINGS.get("simulated_obstacles"),
-                         get_new_measurement=SETTINGS.get("new_measurement"),
+                         get_new_measurement=SETTINGS.get("LIVE_DEMO"),
                          fix_vertex_layout=SETTINGS.get("fix_vertex_layout"))
-    if SETTINGS.get("LIVE_DEMO"):
-        assert scene.real_drones
-        assert scene.real_obstacles
-
-    if scene.get_new_measurement:
-        # we can't have a new measurement without real obstacles: what are we measuring then?
-        assert scene.real_obstacles
-
-    if scene.real_drones:
-        # we have to make sure that we check for real obstacles while using real drones, else we may fly
-        # into a building
-        assert scene.real_obstacles
-
-    else:
-        # if we intend to use simulated (not real) drones, we must provide their starting positions
-        scene.simulated_drones_start = simulated_drones_start
-    number_of_targets, graph, static_obstacles = construction(SETTINGS.get('drone_IDs'), scene)
+    drone_num = len(SETTINGS.get("real_drones")) + len(SETTINGS.get("sim_drones"))  # including both real and fake drones
+    start_pos: List[np.ndarray] = SETTINGS.get("start_pos")
+    number_of_targets, graph, static_obstacles = construction(real_drones=SETTINGS.get("real_drones"),
+                                                              sim_drones=SETTINGS.get("sim_drones"),
+                                                              scene=scene, start_pos=start_pos)
     # now we must initialize the free targets
     target_zero = len(graph['graph'].nodes()) - number_of_targets
     scene.free_targets = np.arange(target_zero, len(graph['graph'].nodes()), 1)
     # the home positions are appended to the end of the nodes
-    scene.home_positions = scene.free_targets[-len(SETTINGS.get("drone_IDs")):]
+    scene.home_positions = scene.free_targets[-drone_num:]
     # let's not fly to the home positions, only the 'normal' nodes
-    scene.free_targets = scene.free_targets[:-len(SETTINGS.get("drone_IDs"))]
+    scene.free_targets = scene.free_targets[:-drone_num]
     return scene, graph, static_obstacles
 
 
@@ -665,12 +657,11 @@ def setup_demo() -> Tuple[Construction, Dict, Static_obstacles]:
     print(f"Random seed: {SETTINGS.get('random_seed')}")
     np.random.seed(SETTINGS.get("random_seed"))
     warning(f"DEMO IS {'LIVE' if SETTINGS.get('LIVE_DEMO') else 'NOT LIVE'}")
-    if SETTINGS.get("real_drones"):
-        verify_drones(SETTINGS.get("drone_IDs"))  # throw an error if the drones in frame are not exactly the drones we set above
+    if SETTINGS.get("LIVE_DEMO"):
+        verify_drones(SETTINGS.get("real_drones"))  # throw an error if the drones in frame are not exactly the drones we set above
     setup_logs()
     unpack_car_trajectories()
-    simulated_drones_start: List[np.ndarray] = SETTINGS.get("simulated_start")
-    scene, graph, static_obstacles = setup_scene(simulated_drones_start[:len(SETTINGS.get("drone_IDs"))])
+    scene, graph, static_obstacles = setup_scene()
     return scene, graph, static_obstacles
 
 
@@ -688,17 +679,26 @@ def determine_id(string):
 def determine_home_position(drone_ID: str, graph: Dict):
     """Function that takes a drone and the graph, and returns the index corresponding to the drone's start position in
     the graph."""
-    if SETTINGS.get("real_drones"):
-        mocap = motioncapture.MotionCaptureOptitrack("192.168.2.141")
-        mocap.waitForNextFrame()
-        items = mocap.rigidBodies.items()
-        # let's put the rigid bodies containing cf index into a dictionary with their IDs.
-        drones = {determine_id(name): list(obj.position[:-1]) for name, obj in items if 'cf' in name}
-        # and then select the drone which we're inspecting from the dictionary
-        drone_pos = drones[drone_ID]
+    if drone_ID in SETTINGS.get("sim_drones"):
+        # in the case of simulated drones, we assign positions from the predetermined ones
+        idx = -(SETTINGS.get("sim_drones").index(drone_ID)+1)
+        drone_num = len(SETTINGS.get("sim_drones")) + len(SETTINGS.get("real_drones"))
+        start_pos = SETTINGS.get("start_pos")[:drone_num]
+        drone_pos = start_pos[idx][:-1]
     else:
-        # if we're not using real drones, assign a start to the drone from the simulated ones
-        drone_pos = SETTINGS.get("simulated_start")[SETTINGS.get("drone_IDs").index(drone_ID)][:-1]
+        if SETTINGS.get("LIVE_DEMO"):
+            mocap = motioncapture.MotionCaptureOptitrack("192.168.2.141")
+            mocap.waitForNextFrame()
+            items = mocap.rigidBodies.items()
+            # let's put the rigid bodies containing cf index into a dictionary with their IDs.
+            drones = {determine_id(name): list(obj.position[:-1]) for name, obj in items if 'cf' in name}
+            # and then select the drone which we're inspecting from the dictionary
+            drone_pos = drones[drone_ID]
+        else:
+            # in the case of the drones that we want to consider as 'real', but the demo is not live,
+            # we also assign a position from the predetermined ones
+            drone_pos = SETTINGS.get("start_pos")[SETTINGS.get("real_drones").index(drone_ID)][:-1]
+
     # this line below looks scary but what it does is it selects the x-y coordinates of the starting nodes, and packs
     # them into a tuple with their associated index in graph['graph'].nodes.data('pos')
     starting_positions = [(index, graph['graph'].nodes.data('pos')[index][:-1]) for index in scene.home_positions]
@@ -724,7 +724,7 @@ def initialize_drones(scene: Construction, graph: Dict, demo_start_time) -> List
     """Function that generates the drones, already pre-installed with their first trajectory, collision matrix and
     start time."""
     drones: List[Drone] = []
-    drone_IDs = SETTINGS.get("drone_IDs")
+    drone_IDs = SETTINGS.get("real_drones") + SETTINGS.get("sim_drones")
     for i, drone_ID in enumerate(drone_IDs):
         # let's calculate the first trajectories, since they should be handled differently from the rest
         drone = Drone()
@@ -755,15 +755,16 @@ async def get_handlers(handlers: Dict[str, Union[DroneHandler, None]], drones: L
     """Function that creates the drone handlers, and puts them in a dictionary with the IDs as keys."""
     for idx, drone in enumerate(drones):
         other_drones = [element for element in drones if element != drone]
-        # run the initialization, where we establish a TCP socket for each drone
-        socket = await establish_connection_with_handler(drone.cf_id)
-        # designate a TCP socket and an associated handler for each drone
-        if socket is not None:
-            color = SETTINGS.get("text_colors")[idx]
-            handler = DroneHandler(socket=socket, drone=drone, other_drones=other_drones, color=color)
-            handlers[drone.cf_id] = handler
+        # run the initialization, where we establish a TCP socket for each drone if they aren't a simulated drone. If
+        # they are simulated drones, then leave the socket as None
+        if drone.cf_id in SETTINGS.get("sim_drones"):
+            socket = None
         else:
-            raise NotImplementedError  # immediately stop if we couldn't reach one of the drones
+            socket = await establish_connection_with_handler(drone.cf_id)
+        # designate a TCP socket and an associated handler for each drone
+        color = SETTINGS.get("text_colors")[idx]
+        handler = DroneHandler(socket=socket, drone=drone, other_drones=other_drones, color=color)
+        handlers[drone.cf_id] = handler
         await sleep(0.01)
     return handlers
 
@@ -864,7 +865,8 @@ async def demo():
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
 SETTINGS = {
-    "drone_IDs": ["07", "09"],
+    "real_drones": ["08", "09"],
+    "sim_drones": ["04", "07"],
     "random_seed": 11810,
     "LIVE_DEMO": False,
     "demo_time": 40,
@@ -872,27 +874,26 @@ SETTINGS = {
     "TAKEOFF_DURATION": 4,
     "traj_type": "COMPRESSED",
     "absolute_traj": True,
-    "new_measurement": False, # TODO: !new_meas && real_drones -> maybe auto-detect starting position?
-    "real_obstacles": True,
-    "real_drones": False,
+    "real_obstacles": False,
     "simulated_obstacles": False,
     "SERVER_PORT": 6000,
     "DUMMY_SERVER_PORT": 7000,
-    "CAR": True,
+    "CAR": False,
+    "SIMULATION": True,
     "equidistant_knots": False,
-    "simulated_start": [np.array([1.25, 0, 0]),
-                        np.array([1.25, -0.5, 0]),
-                        np.array([1, -1, 0]),
-                        np.array([0.6, -1.3, 0]),
-                        np.array([0, 0, 0])],
+    "start_pos": [np.array([1.25, 0, 0]),  # these are the positions where the drones start if we don't use real drones
+                  np.array([1.25, -0.5, 0]),
+                  np.array([1, -1, 0]),
+                  np.array([1.0, 0.5, 0]),
+                  np.array([0.6, -1.3, 0]),
+                  np.array([0, 0, 0])],
     "traj_folder_name": "trajectories",
     "log_folder_name": "logs",
     "car_folder_name": "car",
     "car_radius": 0.15,
     "car_safety_distance": 0.3,
     "EMERGENCY_TIME": 1,
-    "fix_vertex_layout": 4,
-    "SIMULATION": True,
+    "fix_vertex_layout": 5,
     "text_colors": ["\033[92m",
                     "\033[93m",
                     "\033[94m",
@@ -902,7 +903,7 @@ SETTINGS = {
 
 scene, graph, static_obstacles = setup_demo()
 dynamic_obstacles = []
-# plt.show()
+plt.show()
 try:
     trio.run(demo)
 except Exception as exc:
@@ -913,7 +914,7 @@ except Exception as exc:
 print(f"Demo is over, generating skyc file!")
 
 try:
-    generate_skyc_file(SETTINGS.get("drone_IDs"))
+    generate_skyc_file(SETTINGS.get("real_drones"))
 except Exception as exc:
     print(f"Exception: {exc!r}. TRACEBACK:\n")
     print(traceback.format_exc())

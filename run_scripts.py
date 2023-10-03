@@ -2,7 +2,7 @@ import subprocess
 import time
 import platform
 
-server = True
+server = False
 demo = True
 car = True
 skybrush_client = False

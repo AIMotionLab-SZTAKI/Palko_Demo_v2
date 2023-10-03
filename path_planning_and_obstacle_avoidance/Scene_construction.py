@@ -19,7 +19,7 @@ def get_id(string):
 
 # ======================================================================================================================
     # CONSTRUCTION MAIN
-def construction(drone_IDs: List[str], scene: Construction):
+def construction(real_drones: List[str], sim_drones: List[str], scene: Construction, start_pos):
     """
     The scene constructor sets up the static obstacles and the paths of the virtual moving obstacles.
     It also generates the searching graphs.
@@ -43,19 +43,26 @@ def construction(drone_IDs: List[str], scene: Construction):
     # PLACE STATIC OBSTACLES
     static_obstacles = Static_obstacles()
 
-    obstacle_measurements = {}
-    if scene.real_obstacles:
-        obstacle_measurements: Dict[str, np.ndarray] = get_obstacles_positions_from_optitrack(scene.get_new_measurement)
-    if not scene.real_drones:
-        assert scene.simulated_drones_start is not None
+    obstacle_measurements = get_obstacles_positions_from_optitrack(scene.get_new_measurement)
+    if not scene.real_obstacles:
+        # if we don't want obstacles, remove everything other than the crazyflies themselves
+        obstacle_measurements = {key: value for key, value in obstacle_measurements.items() if key.startswith('cf')}
+
+    if scene.live_demo:
+        # if the demo is live, we made a new measurement, which may contain drones that we don't want to fly
+        # with: remove them
+        extra_cfs = [key for key in obstacle_measurements.keys() if
+                     key.startswith("cf") and get_id(key) not in real_drones]
+        [obstacle_measurements.pop(cf) for cf in extra_cfs]
+        # then add the simulated drones to the dictionary
+        for idx, drone_ID in enumerate(sim_drones):
+            obstacle_measurements[f"cf{drone_ID}"] = start_pos[idx]
+    else:
         # remove cfs from the dictionary
         obstacle_measurements = {key: value for key, value in obstacle_measurements.items() if not key.startswith('cf')}
-        # add simulated cfs to the dictionary
-        for idx, drone_ID in enumerate(drone_IDs):
-            obstacle_measurements[f"cf{drone_ID}"] = scene.simulated_drones_start[idx]
-    # Remove the cfs that we don't plan on flying with
-    extra_cfs = [key for key in obstacle_measurements.keys() if key.startswith("cf") and get_id(key) not in drone_IDs]
-    [obstacle_measurements.pop(cf) for cf in extra_cfs]
+        # then add both the simulated and the 'real' drones to the dictionary
+        for idx, drone_ID in enumerate(real_drones + sim_drones):
+            obstacle_measurements[f"cf{drone_ID}"] = start_pos[idx]
     # Note: add_dimension_to_obstacles also has the side effect of organizing the obstacles in a way where the
     # cf-type objects are placed at the end of the array!
     enclosed_space_real = add_dimension_to_obstacles(obstacle_measurements, scene.real_obstacles_side_lengths)

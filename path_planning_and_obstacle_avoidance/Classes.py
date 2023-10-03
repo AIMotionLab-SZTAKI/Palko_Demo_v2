@@ -1,14 +1,16 @@
 import numpy as np
 import math
 from scipy import interpolate
+from typing import List
 
 
 class Construction:
     """
     Set params in Scene construction
     """
-    def __init__(self, real_drones: bool = True, real_obstacles: bool = True,
-                 simulated_obstacles: bool = True, get_new_measurement: bool = True,
+    def __init__(self, real_obstacles: bool = True,
+                 live_demo: bool = False, simulated_obstacles: bool = False,
+                 get_new_measurement: bool = True,
                  fix_vertex_layout: int = 4):
         # GENERAL PARAMETERS:
 
@@ -19,14 +21,13 @@ class Construction:
 
         #...............................................................................................................
         # STATIC OBSTACLE RELATED PARAMETERS:
-        self.real_drones = real_drones
-        simulated_drones_start = None
+        self.live_demo = live_demo
 
         # Select which type of static obstacles will be present
         # (real obstacles from measurement, priori given simulated obstacles or both).
-        self.real_obstacles = real_obstacles
         self.simulated_obstacles = simulated_obstacles
         # If true then the position of the obstacles are measured, otherwise use a saved layout.
+        self.real_obstacles = real_obstacles
         self.get_new_measurement = get_new_measurement
         # Select one of the predefined simulated layouts. (0 or not defined layout number results in an empty space)
         # More layouts can be defined in the Scene_constuction.py.
