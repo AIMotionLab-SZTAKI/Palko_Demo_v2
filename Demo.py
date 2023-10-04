@@ -872,15 +872,14 @@ SETTINGS = {
     "demo_time": 40,
     "REST_TIME": 3,
     "TAKEOFF_DURATION": 4,
-    "traj_type": "COMPRESSED",
     "absolute_traj": True,
     "real_obstacles": False,
     "simulated_obstacles": False,
+    "plot": False,
     "SERVER_PORT": 6000,
     "DUMMY_SERVER_PORT": 7000,
     "CAR": False,
     "SIMULATION": True,
-    "equidistant_knots": False,
     "start_pos": [np.array([1.25, 0, 0]),  # these are the positions where the drones start if we don't use real drones
                   np.array([1.25, -0.5, 0]),
                   np.array([1, -1, 0]),
@@ -890,7 +889,9 @@ SETTINGS = {
     "traj_folder_name": "trajectories",
     "log_folder_name": "logs",
     "car_folder_name": "car",
+    "traj_type": "COMPRESSED",
     "car_radius": 0.15,
+    "equidistant_knots": False,
     "car_safety_distance": 0.3,
     "EMERGENCY_TIME": 1,
     "fix_vertex_layout": 5,
@@ -903,7 +904,8 @@ SETTINGS = {
 
 scene, graph, static_obstacles = setup_demo()
 dynamic_obstacles = []
-plt.show()
+if SETTINGS.get("plot", False):
+    plt.show()
 try:
     trio.run(demo)
 except Exception as exc:
