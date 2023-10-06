@@ -38,7 +38,6 @@ if __name__ == '__main__':
     target_list = np.arange(target_zero, len(graph['graph'].nodes()), 1)
     scene.free_targets = target_list
 
-    np.random.seed(225)
 
     drone_num = 4
     drones = []
@@ -49,8 +48,8 @@ if __name__ == '__main__':
         drone.serial_number = i
         drone.start_vertex = np.random.choice(scene.free_targets)
         scene.free_targets = np.delete(scene.free_targets, scene.free_targets == drone.start_vertex)
-        drone.target_vetrex = np.random.choice(scene.free_targets)
-        scene.free_targets = np.delete(scene.free_targets, scene.free_targets == drone.target_vetrex)
+        drone.target_vertex = np.random.choice(scene.free_targets)
+        scene.free_targets = np.delete(scene.free_targets, scene.free_targets == drone.target_vertex)
 
         spline_path, speed_profile, fligth_time, length = generate_trajectory(drone, graph, [],
                                                                               drones, scene.Ts,
@@ -64,7 +63,7 @@ if __name__ == '__main__':
         end_of_trajectories.append(fligth_time)
         t2 = time.time()
         print("-------------------------------------------------------------------------------------")
-        print("Start:", drone.start_vertex, "Target:", drone.target_vetrex)
+        print("Start:", drone.start_vertex, "Target:", drone.target_vertex)
         print("Path length:",  length, "m")
         print("Fligth time:", fligth_time, "sec")
         print("Trajectory generation:", t2 - t1, "sec")

@@ -328,7 +328,6 @@ def generate_random_vertices(number_of_vertices: int, dimensions: np.ndarray, ra
     :return: random_vertices: array([[x,y,z]...[x,y,z]]) -> coordinates of the randomly placed vertices
     """
     DIMENSION = 3
-    np.random.seed(rand_seed)
     random_vertices = np.multiply(dimensions[1::2] - dimensions[0::2],
                                   np.random.rand(number_of_vertices, DIMENSION)) - [dimensions[1], dimensions[3],
                                                                                     - dimensions[4]]

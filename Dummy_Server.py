@@ -11,10 +11,12 @@ def warning(text: str):
     reset = "\033[0m"
     print(f"{color}[{time.time()-start_time:.3f} WARNING] {text}{reset}")
 
+
 def log(text: str):
     color = "\033[36m"
     reset = "\033[0m"
     print(f"{color}[{time.time() - start_time:.3f} LOG] {text}{reset}")
+
 
 class DroneHandler:
     def __init__(self, uav_id: str, stream: trio.SocketStream, color):
@@ -133,6 +135,7 @@ class DroneHandler:
                     warning(f"drone{self.uav_id}: TCP handler crashed: {exc!r}")
                     break
 
+
 async def listen_and_broadcast(stream: trio.SocketStream, *,port: int, streams: List[trio.SocketStream]):
     streams.append(stream)
     print(f"Number of connections on port {port} changed to {len(streams)}")
@@ -205,13 +208,16 @@ async def TCP_parent():
             # func is partial(establish_drone_handler, handlers=handlers), with one positional argument: stream
             serve_tcp = partial(trio.serve_tcp, handler=func, port=port, handler_nursery=nursery)
             nursery.start_soon(serve_tcp)
-        # start = None
-        # while start!= "start":
-        #     start = await trio.to_thread.run_sync(input, 'Type "start" to start car in 4 seconds!!!\n')
-        # try:
-        #     for stream in streams:
-        #         print("STARTING CAR WROOM WROOM")
-        #         await stream.send_all(b'4')
-        # except Exception as exc:
-        #     print(f"Exception: {exc!r}")
+        start = None
+        while start != "start":
+            start = await trio.to_thread.run_sync(input, 'Type "start" to simulate a skyc start!\n')
+        try:
+            for stream in car_streams:
+                print("STARTING CAR WROOM WROOM")
+                await stream.send_all(b'6')
+            for stream in simulation_streams:
+                print("START SIMULATION!")
+                await stream.send_all(b'SHOW')
+        except Exception as exc:
+            print(f"Exception: {exc!r}")
 trio.run(TCP_parent)

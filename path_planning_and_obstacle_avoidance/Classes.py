@@ -177,7 +177,7 @@ class Drone:
         self.serial_number = None
         self.start_time = 0
         self.start_vertex = None
-        self.target_vetrex = None
+        self.target_vertex = None
         self.trajectory = None
         self.fligth_time = 0
         self.surface = None

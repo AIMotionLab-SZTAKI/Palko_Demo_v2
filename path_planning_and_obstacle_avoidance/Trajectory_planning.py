@@ -22,7 +22,7 @@ def generate_trajectory(drone, G: dict, dynamic_obstacles, other_drones, Ts, saf
     # ==================================================================================================================
     # FIND ROUTE
     route, speed = find_route(drone.constant_speeds, G['graph'], dynamic_obstacles, other_drones,
-                              drone.start_vertex, drone.target_vetrex, drone.start_time, coll_matrix_summ)
+                              drone.start_vertex, drone.target_vertex, drone.start_time, coll_matrix_summ)
 
     # ==================================================================================================================
     # FIT SPLINE
@@ -62,7 +62,6 @@ if __name__ == '__main__':
     target_zero = len(graph['graph'].nodes()) - number_of_targets
     targets = np.arange(target_zero, len(graph['graph'].nodes()), 1)
 
-    np.random.seed(225)
     drone_num = 3
     past_drones = []
 
@@ -72,8 +71,8 @@ if __name__ == '__main__':
         drone.serial_number = i
         drone.start_vertex = np.random.choice(targets)
         targets = np.delete(targets, targets == drone.start_vertex)
-        drone.target_vetrex = np.random.choice(targets)
-        targets = np.delete(targets, targets == drone.target_vetrex)
+        drone.target_vertex = np.random.choice(targets)
+        targets = np.delete(targets, targets == drone.target_vertex)
         spline_path, speed_profile, fligth_time, length = generate_trajectory(drone, graph, dynamic_obstacles,
                                                                               past_drones, scene.Ts,
                                                                               scene.general_safety_distance)

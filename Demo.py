@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt
-
+import math
 from path_planning_and_obstacle_avoidance.Scene_construction import construction
 from path_planning_and_obstacle_avoidance.Classes import Construction, Drone, Static_obstacles
 from path_planning_and_obstacle_avoidance.Trajectory_planning import *
@@ -20,8 +20,10 @@ import motioncapture
 from collections import namedtuple
 import traceback
 from queue import Queue
+import socket
 
 DroneCommand = namedtuple("DroneCommand", ["command", "deadline"])
+
 
 class SafeFunc:
     """A class to which we pass a function, making it impossible for asynchronously running processes
@@ -49,6 +51,18 @@ class SafeFunc:
             await up_next.wait() # once it's our turn:
             await sleep(1/200)
             await self._run_func(*args)
+
+
+def send_skyc(file: str):
+    ip = "127.0.0.1"
+    port = (SETTINGS.get("SERVER_PORT") if SETTINGS.get("LIVE_DEMO") else SETTINGS.get("DUMMY_SERVER_PORT")) + 2
+    Socket = socket.socket()
+    Socket.connect((ip, port))
+    Socket.settimeout(None)
+    with open(file, 'rb') as file:
+        data = file.read() + b'SKYC'
+    Socket.sendall(data)
+
 
 def evaluate_trajectories(drone_IDs: List[str]):
     """Function that takes a look at the saved trajectories, and evaluates them with a certain time interval
@@ -175,10 +189,10 @@ def write_trajectory(Data):
         f.write(json_object)
 
 
-def write_to_skyc(Skyc_Data):
+def write_to_skyc(filename, Skyc_Data):
     """Function that generates a complete skyc file from the bezier curves."""
     # delete every file that we can generate that might have been left over from previous sessions
-    name = sys.argv[0][:-3]
+    name = filename
     cleanup(files=["show.json",
                    "cues.json",
                    f"{name}.zip",
@@ -258,7 +272,7 @@ def write_to_skyc(Skyc_Data):
                 file_path = os.path.join(root, file)
                 zipf.write(file_path)
 
-    print('Compression complete. The files and folder have been zipped as demo.zip.')
+    print(f'Compression complete. The files and folder have been zipped as {name}.zip.')
 
     os.rename(f'{name}.zip', f'{name}.skyc')
     # Delete everything that's not 'trajectory.skyc'
@@ -267,13 +281,13 @@ def write_to_skyc(Skyc_Data):
                    f"{name}.zip",
                    "trajectory.json"],
             folders=["drones"])
-    print("Demo skyc file ready!")
+    print(f"{name}.skyc file ready!")
 
 
-def generate_skyc_file(drone_IDs: List[str]):
-    TXYZ = evaluate_trajectories(drone_IDs)
+def generate_skyc_file(filename, drones: List[str]):
+    TXYZ = evaluate_trajectories(drones)
     Skyc_Data = get_skyc_data(TXYZ)
-    write_to_skyc(Skyc_Data)
+    write_to_skyc(filename=filename, Skyc_Data=Skyc_Data)
 
 
 async def async_generate_trajectory(drone, G, dynamic_obstacles, other_drones, Ts, safety_distance):
@@ -408,7 +422,13 @@ class DroneHandler:
         else:
             self.print(f"Got RTH command. Last trajectory should start in {SETTINGS.get('REST_TIME')} sec")
         choose_target(scene, self.drone, self.return_to_home)  # RTH will mean that the target chosen will be the home position
-        self.drone.start_time = round(self.next_command.deadline, 1) # required for trajectory calculation
+        # print(f"Drone {self.drone_ID} target vertex: {self.drone.target_vertex} at position {list(graph['graph'].nodes[self.drone.target_vertex]['pos'])}\n"
+        #       f"Drone {self.drone_ID} start vertex: {self.drone.start_vertex} at position {list(graph['graph'].nodes[self.drone.start_vertex]['pos'])}")
+        # other_target = [list(graph['graph'].nodes[d.target_vertex]['pos'])for d in self.other_drones]
+        # other_start = [list(graph['graph'].nodes[d.start_vertex]['pos']) for d in self.other_drones]
+        # print(f"The other drones targets: {other_target}")
+        # print(f"The otehr drones starts: {other_start}")
+        self.drone.start_time = round(self.next_command.deadline, 1)  # required for trajectory calculation
         spline_path, speed_profile, duration, length = generate_trajectory(drone=self.drone,
                                                                            G=graph,
                                                                            dynamic_obstacles=dynamic_obstacles,
@@ -593,6 +613,7 @@ async def establish_connection_with_handler(drone_id: str):
     else:
         raise NotImplementedError # immediately stop if we couldn't reach one of the drones
 
+
 def setup_logs():
     current_dir = os.getcwd()
     traj_folder_name = SETTINGS.get("traj_folder_name")
@@ -609,10 +630,10 @@ def setup_logs():
 
 def setup_scene() -> Tuple[Construction, Dict, Static_obstacles]:
     """Function that builds the scene and graph for the trajectory generator."""
-    scene = Construction(real_obstacles = SETTINGS.get("real_obstacles"),
+    scene = Construction(real_obstacles=SETTINGS.get("real_obstacles"),
                          live_demo=SETTINGS.get("LIVE_DEMO"),
                          simulated_obstacles=SETTINGS.get("simulated_obstacles"),
-                         get_new_measurement=SETTINGS.get("LIVE_DEMO"),
+                         get_new_measurement=SETTINGS.get("measure"),
                          fix_vertex_layout=SETTINGS.get("fix_vertex_layout"))
     drone_num = len(SETTINGS.get("real_drones")) + len(SETTINGS.get("sim_drones"))  # including both real and fake drones
     start_pos: List[np.ndarray] = SETTINGS.get("start_pos")
@@ -734,9 +755,9 @@ def initialize_drones(scene: Construction, graph: Dict, demo_start_time) -> List
         # actually not the position where the drone in question is. The function below calculates which home position
         # is the closest.
         drone.start_vertex = determine_home_position(drone_ID, graph)
-        drone.target_vetrex = np.random.choice(scene.free_targets)
+        drone.target_vertex = np.random.choice(scene.free_targets)
         # bar the other drones from selecting the node we're going to. i.e. delete the target vertex from the free vertices
-        scene.free_targets = np.delete(scene.free_targets, scene.free_targets == drone.target_vetrex)
+        scene.free_targets = np.delete(scene.free_targets, scene.free_targets == drone.target_vertex)
         drone.start_time = demo_start_time
         spline_path, speed_profile, duration, length = generate_trajectory(drone=drone, G=graph,
                                                                            dynamic_obstacles=dynamic_obstacles,
@@ -767,6 +788,7 @@ async def get_handlers(handlers: Dict[str, Union[DroneHandler, None]], drones: L
         handlers[drone.cf_id] = handler
         await sleep(0.01)
     return handlers
+
 
 async def car_handler(stream: trio.SocketStream,
                       handlers: Dict[str, DroneHandler],
@@ -823,7 +845,6 @@ async def car_handler(stream: trio.SocketStream,
     await stream.send_all(b'-1EOF')  # signal for the server-side handler function to stop listening
 
 
-
 async def demo():
     print(f"Welcome to Palkovits Máté's drone demo++!")
     takeoff = Event()
@@ -844,7 +865,7 @@ async def demo():
         drones = initialize_drones(scene, graph, demo_start_time)
         handlers = await get_handlers(handlers, drones)
         # make the simulation connection
-        if SETTINGS.get("SIMULATION", False):
+        if len(SETTINGS.get("sim_drones")) > 0:
             PORT = SETTINGS.get("SERVER_PORT") if SETTINGS.get("LIVE_DEMO") else SETTINGS.get("DUMMY_SERVER_PORT")
             SIM_PORT = PORT + 2
             sim_stream: trio.SocketStream = await trio.open_tcp_stream("127.0.0.1", SIM_PORT)
@@ -862,11 +883,10 @@ async def demo():
         for handler in handlers.values():
             await handler.send_and_ack(f"CMDSTART_upload_{handler.trajectory}_EOF".encode())  # upload the first trajectory before starting the demo
 
-
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
 SETTINGS = {
-    "real_drones": ["08", "09"],
-    "sim_drones": ["04", "07"],
+    "real_drones": ["04", "07"],
+    "sim_drones": ["09", "08"],
     "random_seed": 11810,
     "LIVE_DEMO": False,
     "demo_time": 40,
@@ -874,25 +894,27 @@ SETTINGS = {
     "TAKEOFF_DURATION": 4,
     "absolute_traj": True,
     "real_obstacles": False,
-    "simulated_obstacles": False,
+    "measure": False,
     "plot": False,
+    "simulated_obstacles": False,
     "SERVER_PORT": 6000,
     "DUMMY_SERVER_PORT": 7000,
     "CAR": False,
-    "SIMULATION": True,
     "start_pos": [np.array([1.25, 0, 0]),  # these are the positions where the drones start if we don't use real drones
                   np.array([1.25, -0.5, 0]),
                   np.array([1, -1, 0]),
                   np.array([1.0, 0.5, 0]),
                   np.array([0.6, -1.3, 0]),
+                  np.array([0, -1.3, 0]),
+                  np.array([-0.5, -1.3, 0]),
                   np.array([0, 0, 0])],
     "traj_folder_name": "trajectories",
     "log_folder_name": "logs",
     "car_folder_name": "car",
     "traj_type": "COMPRESSED",
-    "car_radius": 0.15,
-    "equidistant_knots": False,
+    "car_radius": 0.2,
     "car_safety_distance": 0.3,
+    "equidistant_knots": False,
     "EMERGENCY_TIME": 1,
     "fix_vertex_layout": 5,
     "text_colors": ["\033[92m",
@@ -916,7 +938,10 @@ except Exception as exc:
 print(f"Demo is over, generating skyc file!")
 
 try:
-    generate_skyc_file(SETTINGS.get("real_drones"))
+    generate_skyc_file(filename="Demo", drones=SETTINGS.get("real_drones"))  # only make a skyc file for the real drones!
+    if len(SETTINGS.get("sim_drones")) > 0:
+        generate_skyc_file(filename="Sim", drones=SETTINGS.get("sim_drones"))
+        send_skyc("Sim.skyc")
 except Exception as exc:
     print(f"Exception: {exc!r}. TRACEBACK:\n")
     print(traceback.format_exc())

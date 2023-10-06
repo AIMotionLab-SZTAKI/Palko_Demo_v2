@@ -578,13 +578,13 @@ def choose_target(scene, drone, return_home: bool = False):
     """
     if drone.start_vertex not in scene.home_positions:
         scene.free_targets = np.append(scene.free_targets, drone.start_vertex)
-    drone.start_vertex = drone.target_vetrex
+    drone.start_vertex = drone.target_vertex
     if return_home:
-        drone.target_vetrex = np.random.choice(scene.home_positions)
-        scene.home_positions = np.delete(scene.home_positions, scene.home_positions == drone.target_vetrex)
+        drone.target_vertex = np.random.choice(scene.home_positions)
+        scene.home_positions = np.delete(scene.home_positions, scene.home_positions == drone.target_vertex)
     else:
-        drone.target_vetrex = np.random.choice(scene.free_targets)
-        scene.free_targets = np.delete(scene.free_targets, scene.free_targets == drone.target_vetrex)
+        drone.target_vertex = np.random.choice(scene.free_targets)
+        scene.free_targets = np.delete(scene.free_targets, scene.free_targets == drone.target_vertex)
 
 
 def check_collisions_with_new_obstacles(new_obstacle: Dynamic_obstacle, drones: list, Ts: float, safety_distance: float,
