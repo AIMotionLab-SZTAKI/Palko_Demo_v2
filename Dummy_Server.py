@@ -56,7 +56,7 @@ class DroneHandler:
             return False, None
 
     async def handle_transmission(self):
-        self.print(f"drone{self.uav_id}: Transmission of trajectory started.")
+        self.print(f"Transmission of trajectory started.")
         start_index = self.stream_data.find(b'{')
         # If the command was 'upload', then a json file must follow. If it doesn't (we can't find the beginning b'{'),
         # then the command or the file was corrupted.
@@ -69,16 +69,16 @@ class DroneHandler:
                 self.traj += await self.stream.receive_some()  # append the new data to the already received data
             self.traj = self.traj[:-len(b'_EOF')]  # once finished, remove the EOF indicator
             self.transmission_active = False  # then signal that the transmission has ended
-            self.print(f"drone{self.uav_id}: Transmission of trajectory finished.")
+            self.print(f"Transmission of trajectory finished.")
 
     async def command(self, cmd: bytes, arg: bytes):
-        self.print(f"drone{self.uav_id}: {cmd.decode('utf-8')} command received.")
+        self.print(f"{cmd.decode('utf-8')} command received.")
         await self.tcp_command_dict[cmd](self, arg)
 
     async def takeoff(self, arg: bytes):
         try:
             arg = float(arg)
-            self.print(f"drone{self.uav_id}: Takeoff command dispatched to drone.")
+            self.print(f"Takeoff command dispatched to drone.")
             await sleep(0.01)
             await self.stream.send_all(b'ACK')  # reply with an acknowledgement
         except ValueError:
@@ -87,7 +87,7 @@ class DroneHandler:
             warning(f"drone{self.uav_id}: Couldn't take off because of this exception: {exc!r}. ")
 
     async def land(self, arg: bytes):
-        self.print(f"{self.uav_id}: Land command dispatched..")
+        self.print(f"Land command dispatched..")
         await self.stream.send_all(b'ACK')  # reply with an acknowledgement
 
     async def upload(self, arg: bytes):
@@ -100,11 +100,11 @@ class DroneHandler:
     async def start(self, arg: bytes):
         is_valid, is_relative = self.get_traj_type(self, arg=arg)
         if is_valid:
-            self.print(f"drone{self.uav_id}: Started {'relative' if is_relative else 'absolute'} trajectory.")
+            self.print(f"Started {'relative' if is_relative else 'absolute'} trajectory.")
             await self.stream.send_all(b'ACK')  # reply with an acknowledgement
 
     async def hover(self, arg: bytes):
-        self.print(f"drone{self.uav_id}: Hover command dispatched.")
+        self.print(f"Hover command dispatched.")
         await self.stream.send_all(b'ACK')  # reply with an acknowledgement
 
     tcp_command_dict: Dict[bytes, Callable] = {
@@ -124,7 +124,7 @@ class DroneHandler:
                         break
                     cmd, arg = self.parse(self.stream_data)
                     if cmd == b'NO_CMDSTART':
-                        self.print(f"{self.uav_id}: Command is missing standard CMDSTART.")
+                        self.print(f"Command is missing standard CMDSTART.")
                         break
                     elif cmd is None:
                         warning(f"{self.uav_id}: None-type command.")
@@ -217,7 +217,7 @@ async def TCP_parent():
                 await stream.send_all(b'6')
             for stream in simulation_streams:
                 print("START SIMULATION!")
-                await stream.send_all(b'SHOW')
+                await stream.send_all(b'00_CMDSTART_show_EOF')
         except Exception as exc:
             print(f"Exception: {exc!r}")
 trio.run(TCP_parent)

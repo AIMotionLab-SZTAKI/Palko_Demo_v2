@@ -4,3 +4,4 @@ trajectories
 .idea/
 **/__pycache__/
 skyc_files
+col_table.txt

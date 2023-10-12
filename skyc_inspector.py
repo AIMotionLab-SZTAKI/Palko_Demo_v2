@@ -3,7 +3,9 @@ import os
 import zipfile
 import shutil
 import json
-from typing import List, Tuple, Union, Optional
+from typing import List, Tuple, Union, Optional, Any
+
+import matplotlib.figure
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.interpolate as interpolate
@@ -11,6 +13,56 @@ import bisect
 from matplotlib.animation import FuncAnimation
 from functools import partial
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import pickle
+
+
+def assert_no_car_collision(drones: List[List[List[float]]], car: List[List[float]]):
+    """Function that checks if the car's 'pole' has collided with any drones and raises an error if it has."""
+    for idx, car_timestamp in enumerate(car[0]):
+        for drone in drones:
+            drone_timestamp = drone[0][idx]
+            assert abs(car_timestamp - drone_timestamp) < TIMESTEP / 50
+            distance = np.sqrt((drone[1][idx] - car[1][idx])**2 + (drone[2][idx] - car[2][idx])**2)
+            # if distance < 0.2:
+            #     print(f"CRASH DETECTED BETWEEN DRONE AND CAR AT {drone_timestamp}")
+            assert distance > 0.2
+
+
+def eval_if_car():
+    """Function that checks if a car log file is present, and if it is, processes its data into an evaluation
+    variable, similar to that of the drones: [[t0, t1, ..], [x0, x1, ...], [y0, y1, ...], [z0, z1, ...]]"""
+    def get_index_by_time(times: List[float], t: float):
+        """Determine the index of the trajectory segment into which the given 't' falls."""
+        index = 0
+        for i in range(len(times)):
+            if times[i] < t:
+                index = i
+            else:
+                break
+        return index
+    if os.path.exists(os.path.join(os.getcwd(), "logs", "car")) and os.path.exists(os.path.join(os.getcwd(), "car")):
+        car_trajs: List[Tuple[float, Any]] = []
+        # trajs will be: [(timestamp of trajectory start, (tck of traj, speed of traj)), -||-]
+        with open(os.path.join(os.getcwd(), "logs", "car"), 'r') as file:
+            for line in file:
+                parts = line.strip().split(":")
+                with open(os.path.join(os.getcwd(), "car", parts[1].strip()), 'rb') as file:
+                    car_trajs.append((float(parts[0]), pickle.load(file)))
+        car_eval = [[], [], [], []]
+        for eval_time in eval_times:
+            car_eval[0].append(eval_time)
+            traj_idx = get_index_by_time([car_traj[0] for car_traj in car_trajs], eval_time)
+            tck, speed = car_trajs[traj_idx][1]
+            # if the distance would be larger than the traj length -> trajectory was finished
+            # if the distance was negative -> the first trajectory has not started
+            distance = abs(speed) * (eval_time - car_trajs[traj_idx][0])
+            distance = max(min(distance, tck[0][-1]), 0)
+            car_eval[1].append(float(interpolate.splev(distance, tck)[0]))
+            car_eval[2].append(float(interpolate.splev(distance, tck)[1]))
+            car_eval[3].append(float(interpolate.splev(distance, tck)[2]))
+        return car_eval
+    else:
+        return None
 
 
 def rotate_point_around_origo(angle_deg: float, point: np.ndarray) -> np.ndarray:
@@ -22,7 +74,26 @@ def rotate_point_around_origo(angle_deg: float, point: np.ndarray) -> np.ndarray
     return np.dot(rotmat, point)
 
 
-def pose_to_vertices(pose: List[float]) -> List[List[np.ndarray]]:
+def car_position_to_vertices(position: List[float]) -> List[List[np.ndarray]]:
+    """Function that approximates the car's taken 'pole' by a prism with a polygon base. It takes the position of the
+    car and returns the vertices of the prism."""
+    angles = 10  # the angles of the polygon, larger -> more like a circle
+    corners = []
+    faces = []
+    for i in range(2*angles):
+        alpha = i * 2 * np.pi / angles
+        x = position[0] + np.cos(alpha) * CAR_R
+        y = position[1] + np.sin(alpha) * CAR_R
+        z = 0 if i < angles else CAR_H
+        corners.append([x, y, z])
+    faces.append([i for i in range(angles)])
+    faces.append([i for i in range(angles, 2*angles)])
+    for i in range(angles):
+        faces.append([i, (i+1) % angles, (i+1) % angles + angles, i + angles])
+    return [[np.array(corners[vertex]) for vertex in face] for face in faces]
+
+
+def drone_pose_to_vertices(pose: List[float]) -> List[List[np.ndarray]]:
     """Function that takes a pose and returns the vertices that the drone's model will contain in that pose. The pose
     may or may not contain a heading. If it doesn't, then the default angle shall be used."""
     corners = [[-L / 2, -L / 2, -H / 2],
@@ -202,20 +273,52 @@ def assert_no_collisions(traj_eval: List[List[List[float]]]) -> None:
                 assert abs(t1-t2) < TIMESTEP / 50
 
 
-def update_drones(frame_idx: int, anim_data: List[List[List[float]]], drones: List[Poly3DCollection]) -> None:
-    """Function that updates the vertices of the drones according to the current frame's index."""
-    for i, drone in enumerate(drones):
-        pose = [float(lst[frame_idx]) for lst in anim_data[i][1:]]
-        drone.set_verts(pose_to_vertices(pose))
+class PausableAnimation:
+    """Utility class for an animation that can be paused by pressing space."""
+    def __init__(self, anim_data: List[List[List[float]]], drones: List[Poly3DCollection],
+                 car: Optional[Poly3DCollection], car_anim_data: Optional[List[List[float]]],
+                 fig: matplotlib.figure.Figure, frames: int, interval: int, repeat: bool, ax):
+        self.anim_data = anim_data
+        self.drones = drones
+        self.car = car
+        self.anim_data = anim_data
+        self.car_anim_data = car_anim_data
+        self.frames = frames
+        self.interval = interval
+        self.repeat = repeat
+        self.paused = False
+        self.text = ax.text2D(0, 0, "t=0.00s", transform=ax.transAxes, fontsize=10, color="black")
+        self.animation = FuncAnimation(fig, self.update, frames=self.frames,
+                                       interval=self.interval, repeat=self.repeat)
+        fig.canvas.mpl_connect('key_press_event', self.toggle_pause)
+
+    def update(self, frame_idx: int):
+        """Function that updates the vertices of the drones according to the current frame's index."""
+        self.text.set_text(f"t={self.anim_data[0][0][frame_idx]:.2f}s")
+        for i, drone in enumerate(self.drones):
+            pose = [float(lst[frame_idx]) for lst in self.anim_data[i][1:]]
+            drone.set_verts(drone_pose_to_vertices(pose))
+        if self.car is not None:
+            self.car.set_verts(car_position_to_vertices([lst[frame_idx] for lst in self.car_anim_data[1:]]))
+
+    def toggle_pause(self, event):
+        if event.key == ' ':
+            if self.paused:
+                self.animation.resume()
+            else:
+                self.animation.pause()
+            self.paused = not self.paused
 
 
 def animate(limits: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]],
-            fps: float, speed: float, timestep: float, traj_eval: List[List[List[float]]]) -> FuncAnimation:
+            fps: float, speed: float, timestep: float, traj_eval: List[List[List[float]]],
+            car_eval: Optional[List[List[float]]]) -> FuncAnimation:
     """Function that takes initializes the 3D plot for the animation, as well as the animation itself then returns the
     animation object."""
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
     ax.cla()
+    ax.set_title("Press space to pause/resume animation.")
     ax.set_xlim(*limits[0])
     ax.set_ylim(*limits[1])
     ax.set_zlim(*limits[2])
@@ -229,14 +332,21 @@ def animate(limits: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float,
     anim_length = len(anim_traj_eval[0][0])
     start_poses = [[float(lst[0]) for lst in drone[1:]] for drone in traj_eval]
     # we initialize the drones with their starting positions, and later update their vertices in the animation
-    drones = [Poly3DCollection(pose_to_vertices(start_pose), facecolors=COLORS[idx], edgecolors='black') for
+    drones = [Poly3DCollection(drone_pose_to_vertices(start_pose), facecolors=COLORS[idx], edgecolors='black') for
               idx, start_pose in enumerate(start_poses)]
+    if car_eval is not None:
+        car_start = [car_eval[1][0], car_eval[2][0]]
+        car = Poly3DCollection(car_position_to_vertices(car_start), facecolors=COLORS[-1], edgecolors='black')
+        car_anim_data = [lst[::round(1 / timestep / fps)] for lst in car_eval]
+        ax.add_collection3d(car)
+    else:
+        car_anim_data = None
+        car = None
     for drone in drones:
         ax.add_collection3d(drone)
-    update_func = partial(update_drones, anim_data=anim_traj_eval, drones=drones)
-    animation = FuncAnimation(fig, update_func, frames=anim_length, interval=anim_interval,
-                              repeat=False)
-    return animation
+    anim = PausableAnimation(anim_data=anim_traj_eval, drones=drones, car=car, car_anim_data=car_anim_data,
+                             fig=fig, frames=anim_length, interval=anim_interval, repeat=True, ax=ax)
+    return anim.animation
 
 
 def plot_data(traj_eval: List[List[List[float]]],
@@ -300,24 +410,31 @@ def plot_data(traj_eval: List[List[List[float]]],
 
 LIMITS = ((-2, 2), (-2, 2), (-0.05, 3.95))  # physical constraints of the optitrack system
 TIMESTEP = 0.005  # we keep this relatively constant for the sake of the animation coming later
-SKYC_FILE = "nice_skyc_files/3_drones/2.skyc"
+SKYC_FILE = "Demo.skyc"
 traj_data = get_traj_data(SKYC_FILE)  # this will be a list of the dictionaries in the trajectory.json files
 takeoff_time, land_time = extend_takeoff_land(traj_data)  # make every trajectory start and end at the same time
 eval_times = list(np.linspace(takeoff_time, land_time, round((land_time - takeoff_time) / TIMESTEP)))
 traj_eval = [evaluate_trajectory(trajectory, eval_times) for trajectory in traj_data]
 assert_no_collisions(traj_eval)
+car_eval = eval_if_car()
+if car_eval is not None:
+    assert_no_car_collision(drones=traj_eval, car=car_eval)
 first_deriv = [get_derivative(item) for item in traj_eval]
 second_deriv = [get_derivative(item) for item in first_deriv]
 ANIM_FPS = 50
 ANIM_SPEED = 5  # this is the factor by which we speed the animation up in case it's slow due to calculations
-COLORS = ['r', 'b', 'g', 'y', 'c', 'm'][:len(traj_eval)]
-DRONE_SCALE = 3
+# COLORS = ['r', 'b', 'g', 'y', 'c', 'm'][:len(traj_eval)]
+COLORS = ['r', 'b', 'g', 'y', 'c', 'm']
+DRONE_SCALE = 2
+CAR_SCALE = 1
+CAR_H = 2 * CAR_SCALE
+CAR_R = 0.15 * CAR_SCALE
 L = 0.1 * DRONE_SCALE
 H = 0.05 * DRONE_SCALE
 P = 0.04 * DRONE_SCALE
 DEFAULT_ANGLE = 0
 plot_data(traj_eval, first_deriv, second_deriv)
-animation = animate(LIMITS, ANIM_FPS, ANIM_SPEED, TIMESTEP, traj_eval)
+animation = animate(LIMITS, ANIM_FPS, ANIM_SPEED, TIMESTEP, traj_eval, car_eval)
 plt.show()
 
 

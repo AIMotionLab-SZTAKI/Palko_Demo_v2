@@ -1,9 +1,11 @@
 from queue import PriorityQueue
 from typing import Tuple, List
 
+import gurobipy.gurobipy
 import matplotlib.pyplot as plt
 import networkx as nx
 import copy
+import math
 
 import numpy as np
 from gurobipy import *
@@ -360,6 +362,7 @@ def optimize_speed_profile(drone: Drone, other_drones: list, dynamic_obstacles: 
                                                       safety_distance, table, collision_counter)
         table, collision_counter = fill_table_elipsoids(other_drones, drone_pos, tgrid, sgrid, drone.radius,
                                                         drone.DOWNWASH, safety_distance, table, collision_counter)
+
         opt_mod = run_gurobi(drone, collision_counter, table, H, Ts, length, tgrid, speed)
 
         try:
@@ -370,6 +373,12 @@ def optimize_speed_profile(drone: Drone, other_drones: list, dynamic_obstacles: 
             if time_window == time_windows[-1]:
                 #=======================================================
                 print("DEBUG: DEADLOCK")
+
+                with open("col_table.txt", 'w') as file:
+                    np.set_printoptions(threshold=50000, linewidth=50000)
+                    file.write(str(table))
+                    np.set_printoptions(threshold=1000, linewidth=75)
+
                 plot_arena([-1.5, 1.5, -1.5, 1.5, 0, 3])
                 plot_trajectoty(spline_path, length, 1)
                 plot_trajectoty(dynamic_obstacles[0].path_tck, dynamic_obstacles[0].path_length, 3)

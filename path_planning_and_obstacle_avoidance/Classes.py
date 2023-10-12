@@ -107,8 +107,8 @@ class Construction:
         # (eg.: collision matrix, speed-profile optimization)
         self.Ts = 0.1
         # The minimal and maximal costs wich could be assigned to a point in the point cloud of the edges.
-        self.cmin = 500
-        self.cmax = 5000
+        self.cmin = 5000
+        self.cmax = 50000
 
         # ..............................................................................................................
         self.free_targets = np.array([])

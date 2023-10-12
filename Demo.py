@@ -427,7 +427,8 @@ class DroneHandler:
         # other_target = [list(graph['graph'].nodes[d.target_vertex]['pos'])for d in self.other_drones]
         # other_start = [list(graph['graph'].nodes[d.start_vertex]['pos']) for d in self.other_drones]
         # print(f"The other drones targets: {other_target}")
-        # print(f"The otehr drones starts: {other_start}")
+        # print(f"The other drones starts: {other_start}")
+        self.drone.start_time = round(self.next_command.deadline, 1) if current_time() < self.next_command.deadline else round(current_time()+SETTINGS.get("REST_TIME"), 1)
         self.drone.start_time = round(self.next_command.deadline, 1)  # required for trajectory calculation
         spline_path, speed_profile, duration, length = generate_trajectory(drone=self.drone,
                                                                            G=graph,
@@ -798,6 +799,10 @@ async def car_handler(stream: trio.SocketStream,
     """Function that handles the communication with the car, calculates whether a collision is about to occur, then
     instructs the handlers to calculate an emergency maneuver if necessary."""
     print(f"[{display_time():.3f}] TCP connection to car handler made. Waiting for init message.")
+    car_log = os.path.join(SETTINGS.get("log_folder_name"), "car")
+    if os.path.exists(car_log):
+        os.remove(car_log)
+    open(car_log, 'a').close()
     car_safety_distance = SETTINGS.get("car_safety_distance")
     init_message: bytes = b""
     while init_message != b"ready":
@@ -805,7 +810,7 @@ async def car_handler(stream: trio.SocketStream,
     print(f"Got init message!")
     car_ready.set()
     await takeoff.wait()
-    await stream.send_all(b'6')
+    await stream.send_all(b'6') # MATCH THIS TO THE SKYBRUSH SERVER!
     while True:
         try:
             # data may get transmitted in several packages, so keep reading until we find end of file
@@ -813,6 +818,9 @@ async def car_handler(stream: trio.SocketStream,
             if not data or data.startswith(b'-1'):
                 break
             traj_num = data.decode("utf-8")
+            with open(car_log, 'a') as log:
+                car_start_display_time = display_time() + SETTINGS.get("EMERGENCY_TIME")
+                log.write(f"{car_start_display_time:.3f}: {traj_num}\n")
             with open(os.path.join(os.getcwd(), SETTINGS.get("car_folder_name"), traj_num), 'rb') as file:
                 tck, speed = pickle.load(file)
             car_start_time = current_time() + SETTINGS.get("EMERGENCY_TIME")
@@ -885,25 +893,25 @@ async def demo():
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
 SETTINGS = {
-    "real_drones": ["04", "07"],
-    "sim_drones": ["09", "08"],
-    "random_seed": 11810,
+    "real_drones": ["04", "07", "08"],
+    "sim_drones": [],
+    "random_seed": 13,
     "LIVE_DEMO": False,
     "demo_time": 40,
     "REST_TIME": 3,
     "TAKEOFF_DURATION": 4,
     "absolute_traj": True,
-    "real_obstacles": False,
+    "real_obstacles": True,
     "measure": False,
     "plot": False,
     "simulated_obstacles": False,
     "SERVER_PORT": 6000,
     "DUMMY_SERVER_PORT": 7000,
-    "CAR": False,
+    "CAR": True,
     "start_pos": [np.array([1.25, 0, 0]),  # these are the positions where the drones start if we don't use real drones
                   np.array([1.25, -0.5, 0]),
                   np.array([1, -1, 0]),
-                  np.array([1.0, 0.5, 0]),
+                  np.array([1.25, 0.5, 0]),
                   np.array([0.6, -1.3, 0]),
                   np.array([0, -1.3, 0]),
                   np.array([-0.5, -1.3, 0]),
@@ -912,16 +920,16 @@ SETTINGS = {
     "log_folder_name": "logs",
     "car_folder_name": "car",
     "traj_type": "COMPRESSED",
-    "car_radius": 0.2,
-    "car_safety_distance": 0.3,
+    "car_radius": 0.15,
+    "car_safety_distance": 0.15,
     "equidistant_knots": False,
     "EMERGENCY_TIME": 1,
-    "fix_vertex_layout": 5,
+    "fix_vertex_layout": 6,
     "text_colors": ["\033[92m",
                     "\033[93m",
                     "\033[94m",
                     "\033[96m",
-                    "\033[95m",],
+                    "\033[95m"],
 }
 
 scene, graph, static_obstacles = setup_demo()

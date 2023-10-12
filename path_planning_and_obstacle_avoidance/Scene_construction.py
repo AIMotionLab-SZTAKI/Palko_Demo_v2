@@ -257,7 +257,7 @@ def select_fix_vertex_set(index_of_verex_set: int) -> np.ndarray:
                  [-outer_xy, outer_xy, high_layer], [inner_xy, outer_xy, high_layer],
                  [-outer_xy, 0, high_layer], [-inner_xy, 0, high_layer], [inner_xy, 0, high_layer]]
     elif index_of_verex_set == 6:
-        V_fix = [[1.4, -1.3, 1],
+        V_fix = [[-0.4, -1.4, 1],
                  [-1.35, 0.7, 0.7],
                  [-0.75, 1.35, 0.7],
                  [-0.35, 0, 1.2],
