@@ -90,7 +90,7 @@ def construction(real_drones: List[str], sim_drones: List[str], scene: Construct
 
 # ======================================================================================================================
     # GRAPH GENERATION
-    V_fix = select_fix_vertex_set(scene.fix_vertex_layout)
+    V_fix = select_fix_vertex_set(scene.fix_vertex_layout, N=scene.N)
     V_fix = add_vertices_above_obstacles(static_obstacles.enclosed_space_of_safe_zone, V_fix, scene.dimensions[-1],
                                          scene.howering_heigt)
 
@@ -186,7 +186,7 @@ def select_fix_obstacle_set(index_of_obstacle_set: int) -> np.ndarray:
     return np.column_stack((obstacle_positions, obstacle_dimensions))
 
 
-def select_fix_vertex_set(index_of_verex_set: int) -> np.ndarray:
+def select_fix_vertex_set(index_of_verex_set: int, N=0) -> np.ndarray:
     """
     Define the target points which will be available for the drones to fly to. To add a new set of targets just
     add a new elif statement and define a set of cordinates.
@@ -263,6 +263,17 @@ def select_fix_vertex_set(index_of_verex_set: int) -> np.ndarray:
                  [-0.35, 0, 1.2],
                  [-1.35, -0.4, 0.8],
                  [0, 1.35, 0.8]]
+    elif index_of_verex_set == 7:
+        spacing = 0.5
+        y_max = (N+1) * spacing
+        x_max = y_max
+        X = list(np.arange(spacing, x_max, spacing))
+        Y = list(np.arange(spacing, y_max, spacing))
+        left = [[0, y, 1] for y in Y]
+        top = [[x, y_max, 1] for x in X]
+        right = [[x_max, y, 1]for y in Y]
+        V_fix = left + top + right
+
     else:
         return np.array([])
     return np.array(V_fix)

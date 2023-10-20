@@ -11,11 +11,11 @@ def generate_trajectory(drone, G: dict, dynamic_obstacles, other_drones, Ts, saf
     # ==================================================================================================================
     # SUMM COLLISION MATRICES
     time_min = drone.start_time
-    time_max = time_min+30
+    time_max = time_min+45
     coll_matrix_summ = summ_collision_matrices(other_drones, time_min, time_max, Ts)
     if not len(dynamic_obstacles) == 0:
         coll_matrix_summ_obs = summ_collision_matrices(dynamic_obstacles, time_min, time_max, Ts)
-        if len(coll_matrix_summ) !=0:
+        if len(coll_matrix_summ) != 0:
             coll_matrix_summ[1:, 1:] += coll_matrix_summ_obs[1:, 1:]
         else:
             coll_matrix_summ = coll_matrix_summ_obs

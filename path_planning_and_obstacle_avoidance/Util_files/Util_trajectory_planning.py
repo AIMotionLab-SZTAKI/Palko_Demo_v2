@@ -144,6 +144,8 @@ def summ_collision_matrices(other_drones: list, time_min: float, time_max: float
     for other_drone in other_drones:
         added_coll_matrix = other_drone.collision_matrix_compressed[1:, 1:]
         later_times = round((time_max - other_drone.collision_matrix_compressed[-1][0])/Ts)
+        if later_times < 0:
+            print(f"LATER TIMES NEGATIVE??? {later_times}")
         if later_times: # When the obstacles finises its movement
             one_M = np.ones((later_times, np.shape(other_drones[0].collision_matrix_compressed)[1] - 1))
             coll_matrix_at_end = 99999999999 * one_M * other_drone.collision_matrix_compressed[-1][1:]

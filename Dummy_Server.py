@@ -94,7 +94,7 @@ class DroneHandler:
         await self.handle_transmission()
         trajectory_data = json.loads(self.traj.decode('utf-8'))
         f"Defined trajectory of length {trajectory_data.get('landingTime')} sec for drone {self.uav_id}"
-        await sleep(0.5)
+        # await sleep(0.5)
         await self.stream.send_all(b'ACK')  # reply with an acknowledgement
 
     async def start(self, arg: bytes):
@@ -168,7 +168,8 @@ async def establish_drone_handler(stream: trio.SocketStream, *, handlers: List[D
                 warning(f"ID {requested_id} taken already.")
                 await stream.send_all(b'ACK_00')
                 return
-            handler = DroneHandler(requested_id, stream, color=colors[requested_id])
+            color = colors[requested_id] if len(uav_ids) < 10 else "\033[92m"
+            handler = DroneHandler(requested_id, stream, color=color)
             handlers.append(handler)
             log(f"Made handler for drone {requested_id}. The following drones have handlers: {[handler.uav_id for handler in handlers]}")
             acknowledgement = f"ACK_{requested_id}"
@@ -186,7 +187,8 @@ async def establish_drone_handler(stream: trio.SocketStream, *, handlers: List[D
         await stream.send_all(b'ACK_00')
         return
 
-uav_ids = ["04", "06", "07", "08", "09"]
+# uav_ids = ["04", "06", "07", "08", "09"]
+uav_ids = [str(i) for i in range(10, 30)]
 handlers: List[DroneHandler] = []
 car_streams: List[trio.SocketStream] = []
 simulation_streams: List[trio.SocketStream] = []

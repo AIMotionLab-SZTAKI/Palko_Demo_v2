@@ -11,11 +11,16 @@ class Construction:
     def __init__(self, real_obstacles: bool = True,
                  live_demo: bool = False, simulated_obstacles: bool = False,
                  get_new_measurement: bool = True,
-                 fix_vertex_layout: int = 4):
+                 fix_vertex_layout: int = 4,
+                 N=0):
         # GENERAL PARAMETERS:
 
         # The dimensions of the flying area. (x_min, x_max, y_min, y_max, z_min, z_max)
-        self.dimensions = np.array([-1.5, 1.5, -1.5, 1.5, 0.3, 1.2])
+        self.N = N
+        if N < 10:
+            self.dimensions = np.array([-1.5, 1.5, -1.5, 1.5, 0.3, 1.2])
+        else:
+            self.dimensions = np.array([-1, (N+3)*0.5, -1, (N+3)*0.5, 0.3, 1.5])
         # The safety distance aruond each obstacle. (It can be modified for the individual obstacles)
         self.general_safety_distance = 0.1
 

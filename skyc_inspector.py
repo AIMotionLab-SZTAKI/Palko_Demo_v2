@@ -408,7 +408,8 @@ def plot_data(traj_eval: List[List[List[float]]],
     fig.subplots_adjust(hspace=0.4)
 
 
-LIMITS = ((-2, 2), (-2, 2), (-0.05, 3.95))  # physical constraints of the optitrack system
+# LIMITS = ((-2, 2), (-2, 2), (-0.05, 3.95))  # physical constraints of the optitrack system
+LIMITS = ((-1, 100), (-1, 100), (-1, 2)) # TODO
 TIMESTEP = 0.005  # we keep this relatively constant for the sake of the animation coming later
 SKYC_FILE = "Demo.skyc"
 traj_data = get_traj_data(SKYC_FILE)  # this will be a list of the dictionaries in the trajectory.json files

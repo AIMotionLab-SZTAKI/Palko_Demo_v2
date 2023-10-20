@@ -22,35 +22,34 @@ import traceback
 from queue import Queue
 import socket
 
-DroneCommand = namedtuple("DroneCommand", ["command", "deadline"])
 
-
-class SafeFunc:
-    """A class to which we pass a function, making it impossible for asynchronously running processes
-    to call that function before it returns. If this happens, the function call doesn't disappear, instead
-    if will be performed after the call is over via a queue system."""
-    def __init__(self, function: Callable):
+class Semaphore:
+    """A class which we use to wrap functions to make them process-safe. If we use a semaphore to wrap several
+    functions, those functions cannot be called at the same time in different processes. They will enter a queue and
+    get called one after the other."""
+    def __init__(self):
         self.fifo = Queue()
-        self.function: Callable = function
-        self.resource_taken = False
+        self.busy = False
 
-    async def _run_func(self, *args):
-        self.resource_taken = True  # take the resource
-        await self.function(*args)  # do whatever we want
-        if not self.fifo.empty():
-            alert_next: Event = self.fifo.get()
-            alert_next.set()  # signal that the next in the queue is up
-        self.resource_taken = False  # let go of the resource
-
-    async def __call__(self, *args):
-        if not self.resource_taken: # if the resource was free
-            await self._run_func(*args)
-        else: # if the resource was taken
-            up_next = Event()
-            self.fifo.put(up_next) # stand in queue
-            await up_next.wait() # once it's our turn:
-            await sleep(1/200)
-            await self._run_func(*args)
+    def make_protected(self, fn: Callable):
+        """Returns the function, made safe. Note that it doesn't modify the function, so we have to assign the return
+        value to the original function, or make a new function using this."""
+        async def protected_fn(*args, **kwargs):
+            if not self.busy:  # if the resource was free
+                self.busy = True  # take the resource
+                retval = await fn(*args, **kwargs)  # do whatever we want
+            else:  # if the resource was taken
+                ticket = Event()
+                self.fifo.put(ticket)  # stand in queue
+                await ticket.wait()  # once it's our turn:
+                retval = await fn(*args, **kwargs)  # do whatever we want
+            if not self.fifo.empty():
+                alert_ticket: Event = self.fifo.get()
+                alert_ticket.set()  # signal that the next in the queue is up
+            else:
+                self.busy = False  # let go of the resource
+            return retval
+        return protected_fn
 
 
 def send_skyc(file: str):
@@ -291,20 +290,12 @@ def generate_skyc_file(filename, drones: List[str]):
 
 
 async def async_generate_trajectory(drone, G, dynamic_obstacles, other_drones, Ts, safety_distance):
-    """Not used for now, but in theory, this is an asynchronous, and therefore interruptable version of the
+    """An asynchronous, and therefore interruptable version of the
     generate_trajectory function :)"""
-    result = []
-    def tmpfunc(drone, G, dynamic_obstacles, other_drones, Ts, safety_distance, result):
-        spline_path, speed_profile, duration, length = generate_trajectory(drone=drone, G=G,
-                                                                           dynamic_obstacles=dynamic_obstacles,
-                                                                           other_drones=other_drones,
-                                                                           Ts = Ts,
-                                                                           safety_distance=safety_distance)
-        result.clear()
-        result.extend([spline_path, speed_profile, duration, length])
-    await trio.to_thread.run_sync(partial(tmpfunc, drone=drone, G=G, dynamic_obstacles=dynamic_obstacles,
-                                          other_drones=other_drones, Ts=Ts, safety_distance=safety_distance))
-    return result
+    tmpfunc = partial(generate_trajectory, drone=drone, G=G, dynamic_obstacles=dynamic_obstacles,
+                      other_drones=other_drones, Ts=Ts, safety_distance=safety_distance)
+    spline_path, speed_profile, duration, length = await trio.to_thread.run_sync(tmpfunc)
+    return spline_path, speed_profile, duration, length
 
 
 def warning(text):
@@ -322,12 +313,18 @@ def display_time():
     return current_time() - display_time.start_time
 
 
-class DroneHandler:
+class DroneCommand:
+    def __init__(self, command: Callable, deadline: float):
+        self.command = command
+        self.deadline = deadline
 
+
+class DroneHandler:
     next_command: Union[DroneCommand, None] # which function to call next, and when it has to finish
     sim_send: Callable
 
     def __init__(self, socket: trio.SocketStream, drone: Drone, other_drones: List[Drone], color: str):
+        self.stream_semaphore = Semaphore()
         self.drone = drone
         self.drone_ID = drone.cf_id  # same as the key in the dictionary for the handler
         self.socket: Union[None, trio.SocketStream] = socket  # used for communication with the handler
@@ -335,8 +332,9 @@ class DroneHandler:
         self.return_to_home = False  # used to signal that the drone's next trajectory will be a RTH maneuver
         self.other_drones = other_drones
         self.interrupt = Event()  # used to wake the drone from sleep
-        self.text_color = color
+        self.text_color = color if self.drone_ID != "10" else "\033[96m"
         self.traj_id = 0
+        self.safe_send = self.stream_semaphore.make_protected(self.send_and_ack)
 
         # make folders for trajectory files and log files:
         traj_folder_path = os.path.join(os.getcwd(), SETTINGS.get("traj_folder_name"))
@@ -347,9 +345,6 @@ class DroneHandler:
         if os.path.exists(self.log_file_path):
             os.remove(self.log_file_path)
         open(self.log_file_path, 'a').close()
-
-    # async def sim_send(self, *args): # gets overwritten with an actual function -> move it from here?
-    #     pass
 
     def print(self, text):
         """Function that we can use instead of the regular pring in the context of a drone handler, to print with
@@ -409,71 +404,79 @@ class DroneHandler:
         """Handles a takeoff command: send the necessary message and then prepare a start command."""
         height = interpolate.splev(0, self.drone.trajectory['spline_path'])[2]
         self.print(f"Got takeoff command, takeoff height is {height:.3f}.")
-        await self.send_and_ack(f"CMDSTART_takeoff_{height:.4f}_EOF".encode())
+        await self.safe_send(f"CMDSTART_takeoff_{height:.4f}_EOF".encode())
         await self.move_to_next_command(next_callable=self.start, duration=self.drone.fligth_time)
 
-    async def calculate_upload(self):
-        """Handles the calculations regarding a new trajectory, and uploads it to the drone.
-        Next command will be the start command for this trajectory."""
-        # if the demo time is past, it's about time that we pick a home destination and go there in order to land
+    async def _calculate(self):
+        calc_start_time = current_time()
         self.return_to_home = display_time() > SETTINGS.get("demo_time")
         if not self.return_to_home:
             self.print(f"Got calculate command. Trajectory should start in {SETTINGS.get('REST_TIME')} sec")
         else:
             self.print(f"Got RTH command. Last trajectory should start in {SETTINGS.get('REST_TIME')} sec")
-        choose_target(scene, self.drone, self.return_to_home)  # RTH will mean that the target chosen will be the home position
-        # print(f"Drone {self.drone_ID} target vertex: {self.drone.target_vertex} at position {list(graph['graph'].nodes[self.drone.target_vertex]['pos'])}\n"
-        #       f"Drone {self.drone_ID} start vertex: {self.drone.start_vertex} at position {list(graph['graph'].nodes[self.drone.start_vertex]['pos'])}")
-        # other_target = [list(graph['graph'].nodes[d.target_vertex]['pos'])for d in self.other_drones]
-        # other_start = [list(graph['graph'].nodes[d.start_vertex]['pos']) for d in self.other_drones]
-        # print(f"The other drones targets: {other_target}")
-        # print(f"The other drones starts: {other_start}")
-        self.drone.start_time = round(self.next_command.deadline, 1) if current_time() < self.next_command.deadline else round(current_time()+SETTINGS.get("REST_TIME"), 1)
-        self.drone.start_time = round(self.next_command.deadline, 1)  # required for trajectory calculation
-        spline_path, speed_profile, duration, length = generate_trajectory(drone=self.drone,
-                                                                           G=graph,
-                                                                           dynamic_obstacles=dynamic_obstacles,
-                                                                           other_drones=self.other_drones,
-                                                                           Ts=scene.Ts,
-                                                                           safety_distance=scene.general_safety_distance)
-        self.drone.trajectory = {'spline_path': spline_path, 'speed_profile': speed_profile}
-        self.drone.fligth_time = duration
-        add_coll_matrix_to_elipsoids([self.drone], graph, scene.Ts, scene.cmin, scene.cmax,
-                                     scene.general_safety_distance)
-        self.trajectory = splines_to_json(spline_path, speed_profile)
-        await self.send_and_ack(f"CMDSTART_upload_{self.trajectory}_EOF".encode())
-        await self.move_to_next_command(next_callable=self.start, duration=duration)
+        choose_target(scene, self.drone,
+                      self.return_to_home)  # RTH will mean that the target chosen will be the home position
+        self.next_command.deadline = current_time() + SETTINGS.get("REST_TIME")  # !
+        with trio.move_on_at(self.next_command.deadline):
+            self.drone.start_time = round(self.next_command.deadline, 1)  # required for trajectory calculation
+            spline_path, speed_profile, duration, length = await async_generate_trajectory(drone=self.drone,
+                                                                                           G=graph,
+                                                                                           dynamic_obstacles=dynamic_obstacles,
+                                                                                           other_drones=self.other_drones,
+                                                                                           Ts=scene.Ts,
+                                                                                           safety_distance=scene.general_safety_distance)
+            self.drone.trajectory = {'spline_path': spline_path, 'speed_profile': speed_profile}
+            self.drone.fligth_time = duration
+            await trio.to_thread.run_sync(add_coll_matrix_to_elipsoids, [self.drone], graph, scene.Ts, scene.cmin,
+                                          scene.cmax,
+                                          scene.general_safety_distance)
+            self.trajectory = splines_to_json(spline_path, speed_profile)
+            self.print(f"Calculations took {(current_time() - calc_start_time):.3f}s.")
+            return
+        raise TimeoutError
 
-    async def emergency_calc_upload(self):
-        """Handles the calculations regarding an emergency avoidance trajectory, and uploads it to the drone.
+    async def calculate_upload(self):
+        """Handles the calculations regarding a new trajectory, and uploads it to the drone.
         Next command will be the start command for this trajectory."""
+        # if the demo time is past, it's about time that we pick a home destination and go there in order to land
+        await self._calculate()
+        await self.safe_send(f"CMDSTART_upload_{self.trajectory}_EOF".encode())
+        await self.move_to_next_command(next_callable=self.start, duration=self.drone.fligth_time)
+
+    async def _emergency_calculate(self):
         self.print(f"Got emergency calculate command.")
         # grab the coordinates of the nodes in the graph currently
         vertices = np.array([graph['graph'].nodes.data('pos')[node_idx] for node_idx in graph['graph'].nodes])
         # this is the time at which the *NEW* emergency trajectory will start
         start_time = math.ceil(self.next_command.deadline * 10) / 10
         # add the position of the drone at time start_time to the graph so we can calculate a trajectory from it
-        extended_graph, new_start_idx = expand_graph(graph, vertices, self.drone, start_time, static_obstacles)
-        origin_vertex = self.drone.start_vertex # save the previous start vertex
+        extended_graph, new_start_idx = await trio.to_thread.run_sync(expand_graph, vertices, self.drone, start_time, static_obstacles)
+        origin_vertex = self.drone.start_vertex  # save the previous start vertex
         self.drone.emergency = True  # signal to gurobi that drone will be moving at the start of the trajectory
         self.drone.start_vertex = new_start_idx
         self.drone.start_time = start_time
-        spline_path, speed_profile, duration, length = generate_trajectory(drone=self.drone,
-                                                                           G={'graph': extended_graph,
-                                                                              'point_cloud': graph['point_cloud']},
-                                                                           dynamic_obstacles=dynamic_obstacles,
-                                                                           other_drones=self.other_drones,
-                                                                           Ts=scene.Ts,
-                                                                           safety_distance=scene.general_safety_distance)
+        spline_path, speed_profile, duration, length = await async_generate_trajectory(drone=self.drone,
+                                                                                       G={'graph': extended_graph,
+                                                                                          'point_cloud': graph['point_cloud']},
+                                                                                       dynamic_obstacles=dynamic_obstacles,
+                                                                                       other_drones=self.other_drones,
+                                                                                       Ts=scene.Ts,
+                                                                                       safety_distance=scene.general_safety_distance)
         self.drone.trajectory = {'spline_path': spline_path, 'speed_profile': speed_profile}
         self.drone.emergency = False
         self.drone.fligth_time = duration
         self.drone.start_vertex = origin_vertex  # reset the previous start vertex
-        add_coll_matrix_to_elipsoids([self.drone], graph, scene.Ts, scene.cmin, scene.cmax,
-                                     scene.general_safety_distance)
+        await trio.to_thread.run_sync(add_coll_matrix_to_elipsoids, [self.drone], graph, scene.Ts, scene.cmin,
+                                      scene.cmax,
+                                      scene.general_safety_distance)
         self.trajectory = splines_to_json(spline_path, speed_profile)
-        await self.send_and_ack(f"CMDSTART_upload_{self.trajectory}_EOF".encode())
-        await self.move_to_next_command(next_callable=self.start, duration=duration)
+
+    async def emergency_calc_upload(self):
+        """Handles the calculations regarding an emergency avoidance trajectory, and uploads it to the drone.
+        Next command will be the start command for this trajectory."""
+        await self._emergency_calculate()
+        await self.safe_send(f"CMDSTART_upload_{self.trajectory}_EOF".encode())
+        await self.move_to_next_command(next_callable=self.start, duration=self.drone.fligth_time)
 
     async def start(self):
         """Handles a start command: send out the necessary message to the server, and prepare the next command.
@@ -481,7 +484,7 @@ class DroneHandler:
         need to land afterwards. Else we need to start a calculation."""
         self.print(f"Got start command. Beginning trajectory lasting {self.drone.fligth_time:.3f} sec.")
         traj_type = "absolute" if SETTINGS.get("absolute_traj", True) else "relative"
-        await self.send_and_ack(f"CMDSTART_start_{traj_type}_EOF".encode())
+        await self.safe_send(f"CMDSTART_start_{traj_type}_EOF".encode())
         self.save_traj()
         if self.return_to_home:
             await self.move_to_next_command(next_callable=self.land, duration=SETTINGS.get("TAKEOFF_DURATION"))
@@ -491,7 +494,7 @@ class DroneHandler:
     async def land(self):
         """Handles a land command, however, the next command is None since the demo is supposed to be over."""
         self.print(f"Got land command.")
-        await self.send_and_ack(f"CMDSTART_land_EOF".encode())
+        await self.safe_send(f"CMDSTART_land_EOF".encode())
         await self.move_to_next_command(next_callable=None, duration=SETTINGS.get("TAKEOFF_DURATION"))
 
     async def do_commands(self):
@@ -631,12 +634,15 @@ def setup_logs():
 
 def setup_scene() -> Tuple[Construction, Dict, Static_obstacles]:
     """Function that builds the scene and graph for the trajectory generator."""
+    drone_num = len(SETTINGS.get("real_drones")) + len(
+        SETTINGS.get("sim_drones"))  # including both real and fake drones
     scene = Construction(real_obstacles=SETTINGS.get("real_obstacles"),
                          live_demo=SETTINGS.get("LIVE_DEMO"),
                          simulated_obstacles=SETTINGS.get("simulated_obstacles"),
                          get_new_measurement=SETTINGS.get("measure"),
-                         fix_vertex_layout=SETTINGS.get("fix_vertex_layout"))
-    drone_num = len(SETTINGS.get("real_drones")) + len(SETTINGS.get("sim_drones"))  # including both real and fake drones
+                         fix_vertex_layout=SETTINGS.get("fix_vertex_layout"),
+                         N=drone_num)
+
     start_pos: List[np.ndarray] = SETTINGS.get("start_pos")
     number_of_targets, graph, static_obstacles = construction(real_drones=SETTINGS.get("real_drones"),
                                                               sim_drones=SETTINGS.get("sim_drones"),
@@ -742,7 +748,7 @@ def determine_home_position(drone_ID: str, graph: Dict):
     return home_pos_index
 
 
-def initialize_drones(scene: Construction, graph: Dict, demo_start_time) -> List[Drone]:
+def initialize_drones(scene: Construction, graph: Dict) -> List[Drone]:
     """Function that generates the drones, already pre-installed with their first trajectory, collision matrix and
     start time."""
     drones: List[Drone] = []
@@ -759,12 +765,11 @@ def initialize_drones(scene: Construction, graph: Dict, demo_start_time) -> List
         drone.target_vertex = np.random.choice(scene.free_targets)
         # bar the other drones from selecting the node we're going to. i.e. delete the target vertex from the free vertices
         scene.free_targets = np.delete(scene.free_targets, scene.free_targets == drone.target_vertex)
-        drone.start_time = demo_start_time
         spline_path, speed_profile, duration, length = generate_trajectory(drone=drone, G=graph,
                                                                            dynamic_obstacles=dynamic_obstacles,
                                                                            other_drones=drones, Ts=scene.Ts,
                                                                            safety_distance=scene.general_safety_distance)
-        drone.trajectory = {'spline_path': spline_path, 'speed_profile': speed_profile}
+        drone.trajectory = {'spline_path': spline_path, 'speed_profile': list(speed_profile)}
         drone.fligth_time = duration
         add_coll_matrix_to_elipsoids([drone], graph, scene.Ts, scene.cmin, scene.cmax,
                                      scene.general_safety_distance)
@@ -773,7 +778,8 @@ def initialize_drones(scene: Construction, graph: Dict, demo_start_time) -> List
     return drones
 
 
-async def get_handlers(handlers: Dict[str, Union[DroneHandler, None]], drones: List[Drone]) -> Dict[str, DroneHandler]:
+async def get_handlers(handlers: Dict[str, Union[DroneHandler, None]], drones: List[Drone], semaphore: Semaphore) -> Dict[str, DroneHandler]:
+    colors = SETTINGS.get("text_colors")
     """Function that creates the drone handlers, and puts them in a dictionary with the IDs as keys."""
     for idx, drone in enumerate(drones):
         other_drones = [element for element in drones if element != drone]
@@ -784,8 +790,9 @@ async def get_handlers(handlers: Dict[str, Union[DroneHandler, None]], drones: L
         else:
             socket = await establish_connection_with_handler(drone.cf_id)
         # designate a TCP socket and an associated handler for each drone
-        color = SETTINGS.get("text_colors")[idx]
+        color = colors[idx % len(colors)]
         handler = DroneHandler(socket=socket, drone=drone, other_drones=other_drones, color=color)
+        handler._calculate = semaphore.make_protected(handler._calculate)
         handlers[drone.cf_id] = handler
         await sleep(0.01)
     return handlers
@@ -853,8 +860,9 @@ async def car_handler(stream: trio.SocketStream,
     await stream.send_all(b'-1EOF')  # signal for the server-side handler function to stop listening
 
 
-async def demo():
+async def demo(drones):
     print(f"Welcome to Palkovits Máté's drone demo++!")
+    semaphore = Semaphore()
     takeoff = Event()
     async with trio.open_nursery() as nursery:
         handlers: Dict[str, Union[DroneHandler, None]] = {}
@@ -867,55 +875,57 @@ async def demo():
                                        dynamic_obstacles=dynamic_obstacles, car_ready=car_ready, takeoff=takeoff))
             print(f"WAITING FOR CAR!!!!")
             await car_ready.wait()
-
-        takeoff_time = current_time() + 1  # leave 1 second for initial calculations, so they don't delay takeoff
-        demo_start_time = takeoff_time + SETTINGS.get("TAKEOFF_DURATION")  # this is when the first trajectory is started
-        drones = initialize_drones(scene, graph, demo_start_time)
-        handlers = await get_handlers(handlers, drones)
+        handlers = await get_handlers(handlers, drones, semaphore)
         # make the simulation connection
         if len(SETTINGS.get("sim_drones")) > 0:
             PORT = SETTINGS.get("SERVER_PORT") if SETTINGS.get("LIVE_DEMO") else SETTINGS.get("DUMMY_SERVER_PORT")
             SIM_PORT = PORT + 2
             sim_stream: trio.SocketStream = await trio.open_tcp_stream("127.0.0.1", SIM_PORT)
-            sim_send = SafeFunc(sim_stream.send_all)
+            sim_semaphore = Semaphore()
+            sim_send = sim_semaphore.make_protected(sim_stream.send_all)
             for handler in handlers.values():
                 handler.sim_send =sim_send
-
-        await sleep_until(takeoff_time)
         takeoff.set()
         display_time.start_time = current_time()  # reset display time to 0
+        demo_start_time = current_time() + SETTINGS.get("TAKEOFF_DURATION")  # start time of first trajectory
+        for drone in drones:  # shift the drone time (start time was left as 0 during initial calculations)
+            drone.start_time = demo_start_time
+            drone.trajectory['speed_profile'][0] = demo_start_time + drone.trajectory['speed_profile'][0]
+            drone.collision_matrix_compressed[:, 0] += demo_start_time
+
         for ID, handler in handlers.items():
             handler.next_command = DroneCommand(handler.takeoff, demo_start_time)  # once that's done, take off
             nursery.start_soon(handler.do_commands)  # and start the infinite loop that executes commands
-        await sleep_until(takeoff_time+0.5) # synchronisation point
         for handler in handlers.values():
-            await handler.send_and_ack(f"CMDSTART_upload_{handler.trajectory}_EOF".encode())  # upload the first trajectory before starting the demo
+            await handler.safe_send(f"CMDSTART_upload_{handler.trajectory}_EOF".encode())  # upload the first trajectory before starting the demo
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
+N = 15
 SETTINGS = {
-    "real_drones": ["04", "07", "08"],
-    "sim_drones": [],
-    "random_seed": 13,
+    "real_drones": [],
+    "sim_drones": [str(i) for i in range(10, N+10)],
+    "random_seed": 16,
     "LIVE_DEMO": False,
     "demo_time": 40,
     "REST_TIME": 3,
     "TAKEOFF_DURATION": 4,
     "absolute_traj": True,
-    "real_obstacles": True,
+    "real_obstacles": False,
     "measure": False,
-    "plot": False,
+    "plot": True,
     "simulated_obstacles": False,
     "SERVER_PORT": 6000,
     "DUMMY_SERVER_PORT": 7000,
-    "CAR": True,
-    "start_pos": [np.array([1.25, 0, 0]),  # these are the positions where the drones start if we don't use real drones
-                  np.array([1.25, -0.5, 0]),
-                  np.array([1, -1, 0]),
-                  np.array([1.25, 0.5, 0]),
-                  np.array([0.6, -1.3, 0]),
-                  np.array([0, -1.3, 0]),
-                  np.array([-0.5, -1.3, 0]),
-                  np.array([0, 0, 0])],
+    "CAR": False,
+    "start_pos": [np.array([x, 0, 0]) for x in list(np.arange(0.5, (N+1)*0.5, 0.5))],
+    # "start_pos": [np.array([1.25, 0, 0]),  # these are the positions where the drones start if we don't use real drones
+    #               np.array([1.25, -0.5, 0]),
+    #               np.array([1, -1, 0]),
+    #               np.array([1.25, 0.5, 0]),
+    #               np.array([0.6, -1.3, 0]),
+    #               np.array([0, -1.3, 0]),
+    #               np.array([-0.5, -1.3, 0]),
+    #               np.array([0, 0, 0])],
     "traj_folder_name": "trajectories",
     "log_folder_name": "logs",
     "car_folder_name": "car",
@@ -924,20 +934,22 @@ SETTINGS = {
     "car_safety_distance": 0.15,
     "equidistant_knots": False,
     "EMERGENCY_TIME": 1,
-    "fix_vertex_layout": 6,
+    "fix_vertex_layout": 7,
     "text_colors": ["\033[92m",
                     "\033[93m",
                     "\033[94m",
                     "\033[96m",
                     "\033[95m"],
 }
-
+print("Building graph...")
 scene, graph, static_obstacles = setup_demo()
+print("Built graph, calculating first trajectories...")
 dynamic_obstacles = []
+drones = initialize_drones(scene, graph)
 if SETTINGS.get("plot", False):
     plt.show()
 try:
-    trio.run(demo)
+    trio.run(demo, drones)
 except Exception as exc:
     print(f"Exception: {exc!r}. TRACEBACK:\n")
     print(traceback.format_exc())
@@ -946,7 +958,8 @@ except Exception as exc:
 print(f"Demo is over, generating skyc file!")
 
 try:
-    generate_skyc_file(filename="Demo", drones=SETTINGS.get("real_drones"))  # only make a skyc file for the real drones!
+    if len(SETTINGS.get("real_drones")) > 0:
+        generate_skyc_file(filename="Demo", drones=SETTINGS.get("real_drones"))
     if len(SETTINGS.get("sim_drones")) > 0:
         generate_skyc_file(filename="Sim", drones=SETTINGS.get("sim_drones"))
         send_skyc("Sim.skyc")
