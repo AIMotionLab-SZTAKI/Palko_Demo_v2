@@ -27,9 +27,10 @@ class Semaphore:
     """A class which we use to wrap functions to make them process-safe. If we use a semaphore to wrap several
     functions, those functions cannot be called at the same time in different processes. They will enter a queue and
     get called one after the other."""
-    def __init__(self):
+    def __init__(self, rate=1000):
         self.fifo = Queue()
         self.busy = False
+        self.T = 1/rate
 
     def make_protected(self, fn: Callable):
         """Returns the function, made safe. Note that it doesn't modify the function, so we have to assign the return
@@ -37,11 +38,13 @@ class Semaphore:
         async def protected_fn(*args, **kwargs):
             if not self.busy:  # if the resource was free
                 self.busy = True  # take the resource
+                await sleep(self.T)
                 retval = await fn(*args, **kwargs)  # do whatever we want
             else:  # if the resource was taken
                 ticket = Event()
                 self.fifo.put(ticket)  # stand in queue
                 await ticket.wait()  # once it's our turn:
+                await sleep(self.T)
                 retval = await fn(*args, **kwargs)  # do whatever we want
             if not self.fifo.empty():
                 alert_ticket: Event = self.fifo.get()
@@ -321,7 +324,7 @@ class DroneCommand:
 
 class DroneHandler:
     next_command: Union[DroneCommand, None] # which function to call next, and when it has to finish
-    sim_send: Callable
+    _sim_send: Optional[Callable]
 
     def __init__(self, socket: trio.SocketStream, drone: Drone, other_drones: List[Drone], color: str):
         self.stream_semaphore = Semaphore()
@@ -377,9 +380,7 @@ class DroneHandler:
         """Function that sends a message to the server, and waits for a response if necessary."""
         with open(self.log_file_path, 'a') as log:  # note the command to the log file
             log.write(f"{display_time():.3f}: {data}\n")
-        if self.drone_ID in SETTINGS.get("sim_drones"):
-            await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
-        else:
+        if self.drone_ID in SETTINGS.get("real_drones"):
             assert self.socket is not None
             await self.socket.send_all(data)
             ack = b""
@@ -400,11 +401,18 @@ class DroneHandler:
         self.next_command = next_command
         await self.interruptable_sleep_until(current_command_over)
 
+    async def sim_send(self, data: bytes):
+        if self._sim_send is not None:
+            self.print(f"SIM SEND: {data[:15]}...")
+            await self._sim_send(data)
+
     async def takeoff(self):
         """Handles a takeoff command: send the necessary message and then prepare a start command."""
         height = interpolate.splev(0, self.drone.trajectory['spline_path'])[2]
         self.print(f"Got takeoff command, takeoff height is {height:.3f}.")
-        await self.safe_send(f"CMDSTART_takeoff_{height:.4f}_EOF".encode())
+        data = f"CMDSTART_takeoff_{height:.4f}_EOF".encode()
+        await self.safe_send(data)
+        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
         await self.move_to_next_command(next_callable=self.start, duration=self.drone.fligth_time)
 
     async def _calculate(self):
@@ -440,7 +448,9 @@ class DroneHandler:
         Next command will be the start command for this trajectory."""
         # if the demo time is past, it's about time that we pick a home destination and go there in order to land
         await self._calculate()
-        await self.safe_send(f"CMDSTART_upload_{self.trajectory}_EOF".encode())
+        data = f"CMDSTART_upload_{self.trajectory}_EOF".encode()
+        await self.safe_send(data)
+        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
         await self.move_to_next_command(next_callable=self.start, duration=self.drone.fligth_time)
 
     async def _emergency_calculate(self):
@@ -475,7 +485,9 @@ class DroneHandler:
         """Handles the calculations regarding an emergency avoidance trajectory, and uploads it to the drone.
         Next command will be the start command for this trajectory."""
         await self._emergency_calculate()
-        await self.safe_send(f"CMDSTART_upload_{self.trajectory}_EOF".encode())
+        data = f"CMDSTART_upload_{self.trajectory}_EOF".encode()
+        await self.safe_send(data)
+        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
         await self.move_to_next_command(next_callable=self.start, duration=self.drone.fligth_time)
 
     async def start(self):
@@ -484,7 +496,9 @@ class DroneHandler:
         need to land afterwards. Else we need to start a calculation."""
         self.print(f"Got start command. Beginning trajectory lasting {self.drone.fligth_time:.3f} sec.")
         traj_type = "absolute" if SETTINGS.get("absolute_traj", True) else "relative"
-        await self.safe_send(f"CMDSTART_start_{traj_type}_EOF".encode())
+        data = f"CMDSTART_start_{traj_type}_EOF".encode()
+        await self.safe_send(data)
+        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
         self.save_traj()
         if self.return_to_home:
             await self.move_to_next_command(next_callable=self.land, duration=SETTINGS.get("TAKEOFF_DURATION"))
@@ -494,7 +508,9 @@ class DroneHandler:
     async def land(self):
         """Handles a land command, however, the next command is None since the demo is supposed to be over."""
         self.print(f"Got land command.")
-        await self.safe_send(f"CMDSTART_land_EOF".encode())
+        data = f"CMDSTART_land_EOF".encode()
+        await self.safe_send(data)
+        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
         await self.move_to_next_command(next_callable=None, duration=SETTINGS.get("TAKEOFF_DURATION"))
 
     async def do_commands(self):
@@ -778,7 +794,7 @@ def initialize_drones(scene: Construction, graph: Dict) -> List[Drone]:
     return drones
 
 
-async def get_handlers(handlers: Dict[str, Union[DroneHandler, None]], drones: List[Drone], semaphore: Semaphore) -> Dict[str, DroneHandler]:
+async def get_handlers(handlers: Dict[str, Union[DroneHandler, None]], drones: List[Drone], calc_semaphore: Semaphore) -> Dict[str, DroneHandler]:
     colors = SETTINGS.get("text_colors")
     """Function that creates the drone handlers, and puts them in a dictionary with the IDs as keys."""
     for idx, drone in enumerate(drones):
@@ -792,7 +808,7 @@ async def get_handlers(handlers: Dict[str, Union[DroneHandler, None]], drones: L
         # designate a TCP socket and an associated handler for each drone
         color = colors[idx % len(colors)]
         handler = DroneHandler(socket=socket, drone=drone, other_drones=other_drones, color=color)
-        handler._calculate = semaphore.make_protected(handler._calculate)
+        handler._calculate = calc_semaphore.make_protected(handler._calculate)
         handlers[drone.cf_id] = handler
         await sleep(0.01)
     return handlers
@@ -862,7 +878,7 @@ async def car_handler(stream: trio.SocketStream,
 
 async def demo(drones):
     print(f"Welcome to Palkovits Máté's drone demo++!")
-    semaphore = Semaphore()
+    calc_semaphore = Semaphore()
     takeoff = Event()
     async with trio.open_nursery() as nursery:
         handlers: Dict[str, Union[DroneHandler, None]] = {}
@@ -875,16 +891,21 @@ async def demo(drones):
                                        dynamic_obstacles=dynamic_obstacles, car_ready=car_ready, takeoff=takeoff))
             print(f"WAITING FOR CAR!!!!")
             await car_ready.wait()
-        handlers = await get_handlers(handlers, drones, semaphore)
+        handlers = await get_handlers(handlers, drones, calc_semaphore)
         # make the simulation connection
         if len(SETTINGS.get("sim_drones")) > 0:
             PORT = SETTINGS.get("SERVER_PORT") if SETTINGS.get("LIVE_DEMO") else SETTINGS.get("DUMMY_SERVER_PORT")
             SIM_PORT = PORT + 2
             sim_stream: trio.SocketStream = await trio.open_tcp_stream("127.0.0.1", SIM_PORT)
             sim_semaphore = Semaphore()
-            sim_send = sim_semaphore.make_protected(sim_stream.send_all)
-            for handler in handlers.values():
-                handler.sim_send =sim_send
+
+            async def _sim_send(data):
+                await sim_stream.send_all(data)
+                recv = await sim_stream.receive_some()
+                return recv
+            for drone_ID, handler in handlers.items():
+                handler._sim_send = sim_semaphore.make_protected(_sim_send) if drone_ID in SETTINGS.get("sim_drones") else None
+
         takeoff.set()
         display_time.start_time = current_time()  # reset display time to 0
         demo_start_time = current_time() + SETTINGS.get("TAKEOFF_DURATION")  # start time of first trajectory
@@ -897,16 +918,18 @@ async def demo(drones):
             handler.next_command = DroneCommand(handler.takeoff, demo_start_time)  # once that's done, take off
             nursery.start_soon(handler.do_commands)  # and start the infinite loop that executes commands
         for handler in handlers.values():
-            await handler.safe_send(f"CMDSTART_upload_{handler.trajectory}_EOF".encode())  # upload the first trajectory before starting the demo
+            data = f"CMDSTART_upload_{handler.trajectory}_EOF".encode()
+            await handler.safe_send(data)  # upload the first trajectory before starting the demo
+            await handler.sim_send(f"{handler.drone_ID}_".encode("utf-8") + data)
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
-N = 15
+N = 10
 SETTINGS = {
     "real_drones": [],
     "sim_drones": [str(i) for i in range(10, N+10)],
     "random_seed": 16,
     "LIVE_DEMO": False,
-    "demo_time": 40,
+    "demo_time": 20,
     "REST_TIME": 3,
     "TAKEOFF_DURATION": 4,
     "absolute_traj": True,

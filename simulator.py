@@ -14,6 +14,7 @@ try:
         data = b''
         while not (data.endswith(b'EOF') or data.endswith(b'SKYC')):
             data += Socket.recv(4096)
+        Socket.sendall(b'ACK')
         if data.endswith(b'SKYC'):
             data = data[:-4]
             print(f"{(time.time()-start):.3f}: Received skyc file.")
