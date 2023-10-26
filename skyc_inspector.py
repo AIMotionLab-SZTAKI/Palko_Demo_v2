@@ -407,10 +407,10 @@ def plot_data(traj_eval: List[List[List[float]]],
     fig.subplots_adjust(hspace=0.4)
 
 
-LIMITS = ((-2, 2), (-2, 2), (-0.05, 3.95))  # physical constraints of the optitrack system
-# LIMITS = ((-1, 12), (-1, 12), (-1, 2))  # TODO
+# LIMITS = ((-2, 2), (-2, 2), (-0.05, 3.95))  # physical constraints of the optitrack system
+LIMITS = ((-1, 12), (-1, 12), (-1, 2))  # TODO
 TIMESTEP = 0.005  # we keep this relatively constant for the sake of the animation coming later
-SKYC_FILE = "Demo.skyc"
+SKYC_FILE = "Sim.skyc"
 traj_data = get_traj_data(SKYC_FILE)  # this will be a list of the dictionaries in the trajectory.json files
 takeoff_time, land_time = extend_takeoff_land(traj_data)  # make every trajectory start and end at the same time
 eval_times = list(np.linspace(takeoff_time, land_time, round((land_time - takeoff_time) / TIMESTEP)))
@@ -426,7 +426,7 @@ ANIM_SPEED = 100  # this is the factor by which we speed the animation up in cas
 # COLORS = ['r', 'b', 'g', 'y', 'c', 'm'][:len(traj_eval)]
 COLORS = ['r', 'b', 'g', 'y', 'c', 'm']
 DRONE_SCALE = 2
-DRONE_Z_SCALE = 1
+DRONE_Z_SCALE = 0.3
 CAR_SCALE = 1
 CAR_H = 2 * CAR_SCALE
 CAR_R = 0.15 * CAR_SCALE

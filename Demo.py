@@ -19,14 +19,57 @@ from functools import partial
 import motioncapture
 from collections import namedtuple
 import traceback
-from queue import Queue
+from queue import PriorityQueue, Queue
 import socket
+
+PRIORITY_HIGH = 1
+PRIORITY_MID = 2
+PRIORITY_LOW = 3
+
+class PrioEvent:
+    """A class that has wait() and set() like trio.Event, but is comparable. Here, a subclass would be the obvious
+    soluition, instead of this. However, trio.Event doesn't allow subclassing. """
+    def __init__(self, priority: int):
+        self.event = Event()
+        self.priority = priority
+
+    async def wait(self):
+        await self.event.wait()
+
+    def set(self):
+        self.event.set()
+
+    def __lt__(self, other):
+        return self.priority < other.priority
 
 
 class Semaphore:
+    def __init__(self):
+        self.taken = False
+        self.queue = PriorityQueue()
+
+    async def wait_take(self, priority):
+        if not self.taken:
+            self.taken = True
+        else:
+            ticket = PrioEvent(priority)
+            self.queue.put(ticket)
+            await ticket.wait()
+
+    def let_go(self):
+        if self.queue.empty():
+            self.taken = False
+        else:
+            ticket: PrioEvent = self.queue.get()
+            ticket.set()
+
+
+class MakeProtected:
     """A class which we use to wrap functions to make them process-safe. If we use a semaphore to wrap several
     functions, those functions cannot be called at the same time in different processes. They will enter a queue and
-    get called one after the other."""
+    get called one after the other.
+    Used to be called Semaphore (kind of awkward naming anyway)
+    NOT USED. TODO: DELETE ONCE WE'RE SURE IT WON'T BE USED LATER"""
     def __init__(self, rate=1000):
         self.fifo = Queue()
         self.busy = False
@@ -324,10 +367,10 @@ class DroneCommand:
 
 class DroneHandler:
     next_command: Union[DroneCommand, None] # which function to call next, and when it has to finish
-    _sim_send: Optional[Callable]
+    sim_send: Optional[Callable]
 
-    def __init__(self, socket: trio.SocketStream, drone: Drone, other_drones: List[Drone], color: str):
-        self.stream_semaphore = Semaphore()
+    def __init__(self, socket: trio.SocketStream, drone: Drone, other_drones: List[Drone], color: str,
+                 calc_semaphore: Semaphore):
         self.drone = drone
         self.drone_ID = drone.cf_id  # same as the key in the dictionary for the handler
         self.socket: Union[None, trio.SocketStream] = socket  # used for communication with the handler
@@ -337,8 +380,9 @@ class DroneHandler:
         self.interrupt = Event()  # used to wake the drone from sleep
         self.text_color = color if self.drone_ID != "10" else "\033[96m"
         self.traj_id = 0
-        self.safe_send = self.stream_semaphore.make_protected(self.send_and_ack)
-        self._sim_send = None
+        self.calc_semaphore = calc_semaphore
+        self.stream_semaphore = Semaphore()
+
 
         # make folders for trajectory files and log files:
         traj_folder_path = os.path.join(os.getcwd(), SETTINGS.get("traj_folder_name"))
@@ -382,12 +426,17 @@ class DroneHandler:
         with open(self.log_file_path, 'a') as log:  # note the command to the log file
             log.write(f"{display_time():.3f}: {data}\n")
         if self.drone_ID in SETTINGS.get("real_drones"):
+            await self.stream_semaphore.wait_take(PRIORITY_MID)
             assert self.socket is not None
             await self.socket.send_all(data)
             ack = b""
             while ack != b"ACK":  # wait for a response, if none comes, then this will block the other commands
                 ack = await self.socket.receive_some()
                 await sleep(0.01)
+            self.stream_semaphore.let_go()
+        else:
+            # this function handles the sim semaphore by default
+            await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
         with open(self.log_file_path, 'a') as log:
             log.write(f"{display_time():.3f}: {b'ACK'}\n")
 
@@ -402,18 +451,12 @@ class DroneHandler:
         self.next_command = next_command
         await self.interruptable_sleep_until(current_command_over)
 
-    async def sim_send(self, data: bytes):
-        if self._sim_send is not None:
-            self.print(f"SIM SEND: {data[:15]}...")
-            await self._sim_send(data)
-
     async def takeoff(self):
         """Handles a takeoff command: send the necessary message and then prepare a start command."""
         height = interpolate.splev(0, self.drone.trajectory['spline_path'])[2]
         self.print(f"Got takeoff command, takeoff height is {height:.3f}.")
         data = f"CMDSTART_takeoff_{height:.4f}_EOF".encode()
-        await self.safe_send(data)
-        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
+        await self.send_and_ack(data)
         await self.move_to_next_command(next_callable=self.start, duration=self.drone.fligth_time)
 
     async def _calculate(self):
@@ -448,10 +491,11 @@ class DroneHandler:
         """Handles the calculations regarding a new trajectory, and uploads it to the drone.
         Next command will be the start command for this trajectory."""
         # if the demo time is past, it's about time that we pick a home destination and go there in order to land
+        await self.calc_semaphore.wait_take(PRIORITY_LOW)
         await self._calculate()
+        self.calc_semaphore.let_go()
         data = f"CMDSTART_upload_{self.trajectory}_EOF".encode()
-        await self.safe_send(data)
-        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
+        await self.send_and_ack(data)
         await self.move_to_next_command(next_callable=self.start, duration=self.drone.fligth_time)
 
     async def _emergency_calculate(self):
@@ -486,10 +530,11 @@ class DroneHandler:
     async def emergency_calc_upload(self):
         """Handles the calculations regarding an emergency avoidance trajectory, and uploads it to the drone.
         Next command will be the start command for this trajectory."""
+        await self.calc_semaphore.wait_take(PRIORITY_HIGH)
         await self._emergency_calculate()
+        self.calc_semaphore.let_go()
         data = f"CMDSTART_upload_{self.trajectory}_EOF".encode()
-        await self.safe_send(data)
-        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
+        await self.send_and_ack(data)
         await self.move_to_next_command(next_callable=self.start, duration=self.drone.fligth_time)
 
     async def start(self):
@@ -499,8 +544,7 @@ class DroneHandler:
         self.print(f"Got start command. Beginning trajectory lasting {self.drone.fligth_time:.3f} sec.")
         traj_type = "absolute" if SETTINGS.get("absolute_traj", True) else "relative"
         data = f"CMDSTART_start_{traj_type}_EOF".encode()
-        await self.safe_send(data)
-        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
+        await self.send_and_ack(data)
         self.save_traj()
         if self.return_to_home:
             await self.move_to_next_command(next_callable=self.land, duration=SETTINGS.get("TAKEOFF_DURATION"))
@@ -511,8 +555,7 @@ class DroneHandler:
         """Handles a land command, however, the next command is None since the demo is supposed to be over."""
         self.print(f"Got land command.")
         data = f"CMDSTART_land_EOF".encode()
-        await self.safe_send(data)
-        await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
+        await self.send_and_ack(data)
         await self.move_to_next_command(next_callable=None, duration=SETTINGS.get("TAKEOFF_DURATION"))
 
     async def do_commands(self):
@@ -809,8 +852,8 @@ async def get_handlers(handlers: Dict[str, Union[DroneHandler, None]], drones: L
             socket = await establish_connection_with_handler(drone.cf_id)
         # designate a TCP socket and an associated handler for each drone
         color = colors[idx % len(colors)]
-        handler = DroneHandler(socket=socket, drone=drone, other_drones=other_drones, color=color)
-        handler._calculate = calc_semaphore.make_protected(handler._calculate)
+        handler = DroneHandler(socket=socket, drone=drone, other_drones=other_drones, color=color,
+                               calc_semaphore=calc_semaphore)
         handlers[drone.cf_id] = handler
         await sleep(0.01)
     return handlers
@@ -899,12 +942,16 @@ async def demo(drones):
             sim_stream: trio.SocketStream = await trio.open_tcp_stream("127.0.0.1", SIM_PORT)
             sim_semaphore = Semaphore()
 
-            async def _sim_send(data):
+            async def sim_send(data):
+                await sim_semaphore.wait_take(PRIORITY_MID)
                 await sim_stream.send_all(data)
-                recv = await sim_stream.receive_some()
-                return recv
-            for drone_ID, handler in handlers.items():
-                handler._sim_send = sim_semaphore.make_protected(_sim_send) if drone_ID in SETTINGS.get("sim_drones") else None
+                if SETTINGS.get("wait_sim_ack"):
+                    recv = await sim_stream.receive_some()
+                    assert recv == b'ACK'
+                sim_semaphore.let_go()
+
+            for handler in handlers.values():
+                handler.sim_send = sim_send
 
         takeoff.set()
         display_time.start_time = current_time()  # reset display time to 0
@@ -919,37 +966,38 @@ async def demo(drones):
             nursery.start_soon(handler.do_commands)  # and start the infinite loop that executes commands
         for handler in handlers.values():
             data = f"CMDSTART_upload_{handler.trajectory}_EOF".encode()
-            await handler.safe_send(data)  # upload the first trajectory before starting the demo
+            await handler.send_and_ack(data)  # upload the first trajectory before starting the demo
             await handler.sim_send(f"{handler.drone_ID}_".encode("utf-8") + data)
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
-N = 5
+N = 25
 SETTINGS = {
-    "real_drones": ["04", "06", "07", "08"],
-    # "sim_drones": [str(i) for i in range(10, N+10)],
-    "sim_drones": [],
+    "real_drones": [],
+    "sim_drones": [str(i) for i in range(10, N+10)],
+    "wait_sim_ack": True,
+    # "sim_drones": ["07", "08"],
     "random_seed": 16,
     "LIVE_DEMO": False,
     "demo_time": 40,
     "REST_TIME": 4,
     "TAKEOFF_DURATION": 4,
     "absolute_traj": True,
-    "real_obstacles": True,
+    "real_obstacles": False,
     "measure": False,
-    "plot": False,
+    "plot": True,
     "simulated_obstacles": False,
     "SERVER_PORT": 6000,
     "DUMMY_SERVER_PORT": 7000,
-    "CAR": True,
-    # "start_pos": [np.array([x, 0, 0]) for x in list(np.arange(0.5, (N+1)*0.5, 0.5))],
-    "start_pos": [np.array([1.25, 0, 0]),  # these are the positions where the drones start if we don't use real drones
-                  np.array([1.25, -0.5, 0]),
-                  np.array([1, -1, 0]),
-                  np.array([1.25, 0.5, 0]),
-                  np.array([0.6, -1.3, 0]),
-                  np.array([0, -1.3, 0]),
-                  np.array([-0.5, -1.3, 0]),
-                  np.array([0, 0, 0])],
+    "CAR": False,
+    "start_pos": [np.array([x, 0, 0]) for x in list(np.arange(0.5, (N+1)*0.5, 0.5))],
+    # "start_pos": [np.array([1.25, 0, 0]),  # these are the positions where the drones start if we don't use real drones
+    #               np.array([1.25, -0.5, 0]),
+    #               np.array([1, -1, 0]),
+    #               np.array([1.25, 0.5, 0]),
+    #               np.array([0.6, -1.3, 0]),
+    #               np.array([0, -1.3, 0]),
+    #               np.array([-0.5, -1.3, 0]),
+    #               np.array([0, 0, 0])],
     "traj_folder_name": "trajectories",
     "log_folder_name": "logs",
     "car_folder_name": "car",
@@ -958,7 +1006,7 @@ SETTINGS = {
     "car_safety_distance": 0.15,
     "equidistant_knots": False,
     "EMERGENCY_TIME": 1,
-    "fix_vertex_layout": 6,
+    "fix_vertex_layout": 7, # if initialization doesn't succeeed, this is likely the issue
     "text_colors": ["\033[92m",
                     "\033[93m",
                     "\033[94m",
