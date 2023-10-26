@@ -4,10 +4,9 @@ import platform
 
 server = True
 demo = True
-car = False
+car = True
 skybrush_client = False
-sim = True
-
+sim = False
 if server:
     print(f"Starting server...")
     if platform.system() == "Windows":

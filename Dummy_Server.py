@@ -168,7 +168,7 @@ async def establish_drone_handler(stream: trio.SocketStream, *, handlers: List[D
                 warning(f"ID {requested_id} taken already.")
                 await stream.send_all(b'ACK_00')
                 return
-            color = colors[requested_id] if len(uav_ids) < 10 else "\033[92m"
+            color = colors[requested_id] if requested_id in colors else "\033[92m"
             handler = DroneHandler(requested_id, stream, color=color)
             handlers.append(handler)
             log(f"Made handler for drone {requested_id}. The following drones have handlers: {[handler.uav_id for handler in handlers]}")
@@ -187,8 +187,8 @@ async def establish_drone_handler(stream: trio.SocketStream, *, handlers: List[D
         await stream.send_all(b'ACK_00')
         return
 
-# uav_ids = ["04", "06", "07", "08", "09"]
-uav_ids = [str(i) for i in range(10, 30)]
+uav_ids = ["04", "06", "07", "08", "09"]
+uav_ids = uav_ids + [str(i) for i in range(10, 30)]
 handlers: List[DroneHandler] = []
 car_streams: List[trio.SocketStream] = []
 simulation_streams: List[trio.SocketStream] = []
@@ -200,6 +200,7 @@ colors = {"04": "\033[92m",
           "07": "\033[94m",
           "08": "\033[96m",
           "09": "\033[95m"}
+
 ports: List[Tuple[int, Callable]] = [(PORT, partial(establish_drone_handler, handlers=handlers)),
                                      (PORT+1, partial(listen_and_broadcast, port=PORT+1, streams=car_streams)),
                                      (PORT + 2, partial(listen_and_broadcast, port=PORT+2, streams=simulation_streams))]

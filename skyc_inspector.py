@@ -40,14 +40,13 @@ def eval_if_car():
             else:
                 break
         return index
-    if os.path.exists(os.path.join(os.getcwd(), "logs", "car")) and os.path.exists(os.path.join(os.getcwd(), "car")):
+    if os.path.exists(os.path.join(os.getcwd(), "logs", "car")):
         car_trajs: List[Tuple[float, Any]] = []
         # trajs will be: [(timestamp of trajectory start, (tck of traj, speed of traj)), -||-]
         with open(os.path.join(os.getcwd(), "logs", "car"), 'r') as file:
             for line in file:
-                parts = line.strip().split(":")
-                with open(os.path.join(os.getcwd(), "car", parts[1].strip()), 'rb') as file:
-                    car_trajs.append((float(parts[0]), pickle.load(file)))
+                parts = line.strip().split(": ")
+                car_trajs.append((float(parts[0]), pickle.loads(eval(parts[1]))))
         car_eval = [[], [], [], []]
         for eval_time in eval_times:
             car_eval[0].append(eval_time)
@@ -332,7 +331,7 @@ def animate(limits: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float,
     anim_length = len(anim_traj_eval[0][0])
     start_poses = [[float(lst[0]) for lst in drone[1:]] for drone in traj_eval]
     # we initialize the drones with their starting positions, and later update their vertices in the animation
-    drones = [Poly3DCollection(drone_pose_to_vertices(start_pose), facecolors=COLORS[idx], edgecolors='black') for
+    drones = [Poly3DCollection(drone_pose_to_vertices(start_pose), facecolors=COLORS[idx % len(COLORS)], edgecolors='black') for
               idx, start_pose in enumerate(start_poses)]
     if car_eval is not None:
         car_start = [car_eval[1][0], car_eval[2][0]]
@@ -408,8 +407,8 @@ def plot_data(traj_eval: List[List[List[float]]],
     fig.subplots_adjust(hspace=0.4)
 
 
-# LIMITS = ((-2, 2), (-2, 2), (-0.05, 3.95))  # physical constraints of the optitrack system
-LIMITS = ((-1, 100), (-1, 100), (-1, 2)) # TODO
+LIMITS = ((-2, 2), (-2, 2), (-0.05, 3.95))  # physical constraints of the optitrack system
+# LIMITS = ((-1, 12), (-1, 12), (-1, 2))  # TODO
 TIMESTEP = 0.005  # we keep this relatively constant for the sake of the animation coming later
 SKYC_FILE = "Demo.skyc"
 traj_data = get_traj_data(SKYC_FILE)  # this will be a list of the dictionaries in the trajectory.json files
@@ -423,18 +422,20 @@ if car_eval is not None:
 first_deriv = [get_derivative(item) for item in traj_eval]
 second_deriv = [get_derivative(item) for item in first_deriv]
 ANIM_FPS = 50
-ANIM_SPEED = 5  # this is the factor by which we speed the animation up in case it's slow due to calculations
+ANIM_SPEED = 100  # this is the factor by which we speed the animation up in case it's slow due to calculations
 # COLORS = ['r', 'b', 'g', 'y', 'c', 'm'][:len(traj_eval)]
 COLORS = ['r', 'b', 'g', 'y', 'c', 'm']
 DRONE_SCALE = 2
+DRONE_Z_SCALE = 1
 CAR_SCALE = 1
 CAR_H = 2 * CAR_SCALE
 CAR_R = 0.15 * CAR_SCALE
 L = 0.1 * DRONE_SCALE
-H = 0.05 * DRONE_SCALE
+H = 0.05 * DRONE_SCALE * DRONE_Z_SCALE
 P = 0.04 * DRONE_SCALE
 DEFAULT_ANGLE = 0
-plot_data(traj_eval, first_deriv, second_deriv)
+if len(traj_eval) <= 5:
+    plot_data(traj_eval, first_deriv, second_deriv)
 animation = animate(LIMITS, ANIM_FPS, ANIM_SPEED, TIMESTEP, traj_eval, car_eval)
 plt.show()
 

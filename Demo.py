@@ -91,7 +91,7 @@ def evaluate_trajectories(drone_IDs: List[str]):
             finished_normally = start_time + speed_profile_duration < next_start_time  # True if the trajectory was not aborted early
             if not finished_normally:
                 warning(f"Drone {drone_ID} had an early trajectory recalculation. It was going to finish at "
-                        f"{start_time + speed_profile_duration}, but the new trajectory starts at {next_start_time}.")
+                        f"{(start_time + speed_profile_duration):.3f}, but the new trajectory starts at {(next_start_time):.3f}.")
             end_time = start_time + speed_profile_duration if finished_normally else next_start_time  # when the trajectory actually ended, IN DEMO TIME
             duration = end_time - start_time  # what the trajectory's duration ended up being
             eval_times = np.arange(speed_profile[0][0], speed_profile[0][0] + duration, time_interval)  # timestamps where we evaluate the speed profile, IN TRIO.TIME
@@ -338,6 +338,7 @@ class DroneHandler:
         self.text_color = color if self.drone_ID != "10" else "\033[96m"
         self.traj_id = 0
         self.safe_send = self.stream_semaphore.make_protected(self.send_and_ack)
+        self._sim_send = None
 
         # make folders for trajectory files and log files:
         traj_folder_path = os.path.join(os.getcwd(), SETTINGS.get("traj_folder_name"))
@@ -460,7 +461,8 @@ class DroneHandler:
         # this is the time at which the *NEW* emergency trajectory will start
         start_time = math.ceil(self.next_command.deadline * 10) / 10
         # add the position of the drone at time start_time to the graph so we can calculate a trajectory from it
-        extended_graph, new_start_idx = await trio.to_thread.run_sync(expand_graph, vertices, self.drone, start_time, static_obstacles)
+        extended_graph, new_start_idx = await trio.to_thread.run_sync(expand_graph, graph, vertices, self.drone,
+                                                                      start_time, static_obstacles)
         origin_vertex = self.drone.start_vertex  # save the previous start vertex
         self.drone.emergency = True  # signal to gurobi that drone will be moving at the start of the trajectory
         self.drone.start_vertex = new_start_idx
@@ -674,7 +676,8 @@ def setup_scene() -> Tuple[Construction, Dict, Static_obstacles]:
 
 
 def unpack_car_trajectories():
-    """Function that extracts the car's trajectories from its pickle, and unpacks them to separate trajectories."""
+    """Function that extracts the car's trajectories from its pickle, and unpacks them to separate trajectories.
+    Not used in newer versions. TODO: delete once we're sure it won't be needed later."""
     current_dir = os.getcwd()
     car_folder_name = SETTINGS.get("car_folder_name")
     car_folder_path = os.path.join(current_dir, car_folder_name)
@@ -704,7 +707,6 @@ def setup_demo() -> Tuple[Construction, Dict, Static_obstacles]:
     if SETTINGS.get("LIVE_DEMO"):
         verify_drones(SETTINGS.get("real_drones"))  # throw an error if the drones in frame are not exactly the drones we set above
     setup_logs()
-    unpack_car_trajectories()
     scene, graph, static_obstacles = setup_scene()
     return scene, graph, static_obstacles
 
@@ -821,7 +823,6 @@ async def car_handler(stream: trio.SocketStream,
                       takeoff: Event):
     """Function that handles the communication with the car, calculates whether a collision is about to occur, then
     instructs the handlers to calculate an emergency maneuver if necessary."""
-    print(f"[{display_time():.3f}] TCP connection to car handler made. Waiting for init message.")
     car_log = os.path.join(SETTINGS.get("log_folder_name"), "car")
     if os.path.exists(car_log):
         os.remove(car_log)
@@ -836,17 +837,15 @@ async def car_handler(stream: trio.SocketStream,
     await stream.send_all(b'6') # MATCH THIS TO THE SKYBRUSH SERVER!
     while True:
         try:
-            # data may get transmitted in several packages, so keep reading until we find end of file
-            data: bytes = await stream.receive_some()
+            data: bytes = await stream.receive_some(max_bytes=65536)
             if not data or data.startswith(b'-1'):
                 break
-            traj_num = data.decode("utf-8")
+            tck, speed = pickle.loads(data)
             with open(car_log, 'a') as log:
                 car_start_display_time = display_time() + SETTINGS.get("EMERGENCY_TIME")
-                log.write(f"{car_start_display_time:.3f}: {traj_num}\n")
-            with open(os.path.join(os.getcwd(), SETTINGS.get("car_folder_name"), traj_num), 'rb') as file:
-                tck, speed = pickle.load(file)
+                log.write(f"{car_start_display_time:.3f}: {data}\n")
             car_start_time = current_time() + SETTINGS.get("EMERGENCY_TIME")
+            car_start_time_display = display_time() + + SETTINGS.get("EMERGENCY_TIME")
             car = Dynamic_obstacle(path_tck=tck, path_length=tck[0][-1], speed=abs(speed), radius=SETTINGS.get("car_radius"),
                                    start_time=car_start_time)
             add_coll_matrix_to_poles(obstacles=[car], graph_dict=graph, Ts=scene.Ts, cmin=scene.cmin,
@@ -857,11 +856,12 @@ async def car_handler(stream: trio.SocketStream,
             collision_ids = check_collisions_with_single_obstacle(new_obstacle=car, drones=drones,
                                                                   Ts=scene.Ts, safety_distance=car_safety_distance)
             if len(collision_ids) > 0:
-                warning(f"[{display_time():.3f}] For car trajectory {traj_num}, collisions were detected with the following"
-                        f" drone(s): {collision_ids}. Their emergency trajectories should start in "
-                        f"{SETTINGS.get('EMERGENCY_TIME')}")
+                warning(f"[{display_time():.3f}] For car trajectory starting at {car_start_time_display:.3f}, "
+                        f"collisions were detected with the following drone(s): {collision_ids}. Their emergency "
+                        f"trajectories should start in {SETTINGS.get('EMERGENCY_TIME')}")
             else:
-                warning(f"[{display_time():.3f}] For car trajectory {traj_num}, no collisions were detected.")
+                warning(f"[{display_time():.3f}] For car trajectory starting at {car_start_time_display:.3f}, "
+                        f"no collisions were detected.")
             for id in collision_ids:
                 handler = handlers[id]
                 # instead of whatever the next command was going to be, do an emergency calculation
@@ -923,32 +923,33 @@ async def demo(drones):
             await handler.sim_send(f"{handler.drone_ID}_".encode("utf-8") + data)
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
-N = 10
+N = 5
 SETTINGS = {
-    "real_drones": [],
-    "sim_drones": [str(i) for i in range(10, N+10)],
+    "real_drones": ["04", "06", "07", "08"],
+    # "sim_drones": [str(i) for i in range(10, N+10)],
+    "sim_drones": [],
     "random_seed": 16,
     "LIVE_DEMO": False,
-    "demo_time": 20,
-    "REST_TIME": 3,
+    "demo_time": 40,
+    "REST_TIME": 4,
     "TAKEOFF_DURATION": 4,
     "absolute_traj": True,
-    "real_obstacles": False,
+    "real_obstacles": True,
     "measure": False,
-    "plot": True,
+    "plot": False,
     "simulated_obstacles": False,
     "SERVER_PORT": 6000,
     "DUMMY_SERVER_PORT": 7000,
-    "CAR": False,
-    "start_pos": [np.array([x, 0, 0]) for x in list(np.arange(0.5, (N+1)*0.5, 0.5))],
-    # "start_pos": [np.array([1.25, 0, 0]),  # these are the positions where the drones start if we don't use real drones
-    #               np.array([1.25, -0.5, 0]),
-    #               np.array([1, -1, 0]),
-    #               np.array([1.25, 0.5, 0]),
-    #               np.array([0.6, -1.3, 0]),
-    #               np.array([0, -1.3, 0]),
-    #               np.array([-0.5, -1.3, 0]),
-    #               np.array([0, 0, 0])],
+    "CAR": True,
+    # "start_pos": [np.array([x, 0, 0]) for x in list(np.arange(0.5, (N+1)*0.5, 0.5))],
+    "start_pos": [np.array([1.25, 0, 0]),  # these are the positions where the drones start if we don't use real drones
+                  np.array([1.25, -0.5, 0]),
+                  np.array([1, -1, 0]),
+                  np.array([1.25, 0.5, 0]),
+                  np.array([0.6, -1.3, 0]),
+                  np.array([0, -1.3, 0]),
+                  np.array([-0.5, -1.3, 0]),
+                  np.array([0, 0, 0])],
     "traj_folder_name": "trajectories",
     "log_folder_name": "logs",
     "car_folder_name": "car",
@@ -957,7 +958,7 @@ SETTINGS = {
     "car_safety_distance": 0.15,
     "equidistant_knots": False,
     "EMERGENCY_TIME": 1,
-    "fix_vertex_layout": 7,
+    "fix_vertex_layout": 6,
     "text_colors": ["\033[92m",
                     "\033[93m",
                     "\033[94m",
