@@ -26,6 +26,7 @@ PRIORITY_HIGH = 1
 PRIORITY_MID = 2
 PRIORITY_LOW = 3
 
+
 class PrioEvent:
     """A class that has wait() and set() like trio.Event, but is comparable. Here, a subclass would be the obvious
     soluition, instead of this. However, trio.Event doesn't allow subclassing. """
@@ -64,38 +65,16 @@ class Semaphore:
             ticket.set()
 
 
-class MakeProtected:
-    """A class which we use to wrap functions to make them process-safe. If we use a semaphore to wrap several
-    functions, those functions cannot be called at the same time in different processes. They will enter a queue and
-    get called one after the other.
-    Used to be called Semaphore (kind of awkward naming anyway)
-    NOT USED. TODO: DELETE ONCE WE'RE SURE IT WON'T BE USED LATER"""
-    def __init__(self, rate=1000):
-        self.fifo = Queue()
-        self.busy = False
-        self.T = 1/rate
-
-    def make_protected(self, fn: Callable):
-        """Returns the function, made safe. Note that it doesn't modify the function, so we have to assign the return
-        value to the original function, or make a new function using this."""
-        async def protected_fn(*args, **kwargs):
-            if not self.busy:  # if the resource was free
-                self.busy = True  # take the resource
-                await sleep(self.T)
-                retval = await fn(*args, **kwargs)  # do whatever we want
-            else:  # if the resource was taken
-                ticket = Event()
-                self.fifo.put(ticket)  # stand in queue
-                await ticket.wait()  # once it's our turn:
-                await sleep(self.T)
-                retval = await fn(*args, **kwargs)  # do whatever we want
-            if not self.fifo.empty():
-                alert_ticket: Event = self.fifo.get()
-                alert_ticket.set()  # signal that the next in the queue is up
-            else:
-                self.busy = False  # let go of the resource
-            return retval
-        return protected_fn
+async def send_with_semaphore(data: bytes, semaphore: Semaphore, stream: trio.SocketStream, wait_ack: bool):
+    await semaphore.wait_take(PRIORITY_MID)
+    assert stream is not None
+    await stream.send_all(data)
+    ack = b""
+    if wait_ack:
+        while ack != b"ACK":
+            ack = await stream.receive_some()
+            await sleep(0.001)
+    semaphore.let_go()
 
 
 def send_skyc(file: str):
@@ -426,14 +405,7 @@ class DroneHandler:
         with open(self.log_file_path, 'a') as log:  # note the command to the log file
             log.write(f"{display_time():.3f}: {data}\n")
         if self.drone_ID in SETTINGS.get("real_drones"):
-            await self.stream_semaphore.wait_take(PRIORITY_MID)
-            assert self.socket is not None
-            await self.socket.send_all(data)
-            ack = b""
-            while ack != b"ACK":  # wait for a response, if none comes, then this will block the other commands
-                ack = await self.socket.receive_some()
-                await sleep(0.01)
-            self.stream_semaphore.let_go()
+            await send_with_semaphore(data=data, semaphore=self.stream_semaphore, stream=self.socket, wait_ack=True)
         else:
             # this function handles the sim semaphore by default
             await self.sim_send(f"{self.drone_ID}_".encode("utf-8") + data)
@@ -469,23 +441,23 @@ class DroneHandler:
         choose_target(scene, self.drone,
                       self.return_to_home)  # RTH will mean that the target chosen will be the home position
         self.next_command.deadline = current_time() + SETTINGS.get("REST_TIME")  # !
-        with trio.move_on_at(self.next_command.deadline):
-            self.drone.start_time = round(self.next_command.deadline, 1)  # required for trajectory calculation
-            spline_path, speed_profile, duration, length = await async_generate_trajectory(drone=self.drone,
-                                                                                           G=graph,
-                                                                                           dynamic_obstacles=dynamic_obstacles,
-                                                                                           other_drones=self.other_drones,
-                                                                                           Ts=scene.Ts,
-                                                                                           safety_distance=scene.general_safety_distance)
-            self.drone.trajectory = {'spline_path': spline_path, 'speed_profile': speed_profile}
-            self.drone.fligth_time = duration
-            await trio.to_thread.run_sync(add_coll_matrix_to_elipsoids, [self.drone], graph, scene.Ts, scene.cmin,
-                                          scene.cmax,
-                                          scene.general_safety_distance)
-            self.trajectory = splines_to_json(spline_path, speed_profile)
-            self.print(f"Calculations took {(current_time() - calc_start_time):.3f}s.")
-            return
-        raise TimeoutError
+        self.drone.start_time = round(self.next_command.deadline, 1)  # required for trajectory calculation
+        spline_path, speed_profile, duration, length = await async_generate_trajectory(drone=self.drone,
+                                                                                       G=graph,
+                                                                                       dynamic_obstacles=dynamic_obstacles,
+                                                                                       other_drones=self.other_drones,
+                                                                                       Ts=scene.Ts,
+                                                                                       safety_distance=scene.general_safety_distance)
+        self.drone.trajectory = {'spline_path': spline_path, 'speed_profile': speed_profile}
+        self.drone.fligth_time = duration
+        await trio.to_thread.run_sync(add_coll_matrix_to_elipsoids, [self.drone], graph, scene.Ts, scene.cmin,
+                                      scene.cmax,
+                                      scene.general_safety_distance)
+        self.trajectory = splines_to_json(spline_path, speed_profile)
+        self.print(f"Calculations took {(current_time() - calc_start_time):.3f}s.")
+        if current_time() > self.next_command.deadline:
+            self.print(f"Calculations took too long!")
+            raise TimeoutError
 
     async def calculate_upload(self):
         """Handles the calculations regarding a new trajectory, and uploads it to the drone.
@@ -526,6 +498,9 @@ class DroneHandler:
                                       scene.cmax,
                                       scene.general_safety_distance)
         self.trajectory = splines_to_json(spline_path, speed_profile)
+        if current_time() > self.next_command.deadline:
+            self.print(f"Calculations took too long!")
+            raise TimeoutError
 
     async def emergency_calc_upload(self):
         """Handles the calculations regarding an emergency avoidance trajectory, and uploads it to the drone.
@@ -941,18 +916,9 @@ async def demo(drones):
             SIM_PORT = PORT + 2
             sim_stream: trio.SocketStream = await trio.open_tcp_stream("127.0.0.1", SIM_PORT)
             sim_semaphore = Semaphore()
-
-            async def sim_send(data):
-                await sim_semaphore.wait_take(PRIORITY_MID)
-                await sim_stream.send_all(data)
-                if SETTINGS.get("wait_sim_ack"):
-                    recv = await sim_stream.receive_some()
-                    assert recv == b'ACK'
-                sim_semaphore.let_go()
-
             for handler in handlers.values():
-                handler.sim_send = sim_send
-
+                handler.sim_send = partial(send_with_semaphore, semaphore=sim_semaphore, stream=sim_stream,
+                                           wait_ack=SETTINGS.get("wait_sim_ack"))
         takeoff.set()
         display_time.start_time = current_time()  # reset display time to 0
         demo_start_time = current_time() + SETTINGS.get("TAKEOFF_DURATION")  # start time of first trajectory
@@ -970,13 +936,13 @@ async def demo(drones):
             await handler.sim_send(f"{handler.drone_ID}_".encode("utf-8") + data)
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
-N = 25
+N = 10
 SETTINGS = {
     "real_drones": [],
     "sim_drones": [str(i) for i in range(10, N+10)],
     "wait_sim_ack": True,
     # "sim_drones": ["07", "08"],
-    "random_seed": 16,
+    "random_seed": 18,
     "LIVE_DEMO": False,
     "demo_time": 40,
     "REST_TIME": 4,

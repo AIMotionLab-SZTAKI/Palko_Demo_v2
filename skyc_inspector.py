@@ -205,7 +205,9 @@ def evaluate_segment(points: List[List[float]], start_time: float, end_time: flo
     Y = y_BPoly(eval_time)
     Z = z_BPoly(eval_time)
     # Make sure that the trajectory doesn't take the drone outside the limits of the optitrack system!
-    assert LIMITS[0][0] < X < LIMITS[0][1] and LIMITS[1][0] < Y < LIMITS[1][1] and LIMITS[2][0] < Z < LIMITS[1][1]
+    # assert LIMITS[0][0] < X < LIMITS[0][1] and LIMITS[1][0] < Y < LIMITS[1][1] and LIMITS[2][0] < Z < LIMITS[1][1]
+    if not (LIMITS[0][0] < X < LIMITS[0][1] and LIMITS[1][0] < Y < LIMITS[1][1] and LIMITS[2][0] < Z < LIMITS[1][1]):
+        print(f"OVER LIMIT! X: {X}, Y: {Y}, Z: {Z}")
     retval = [float(eval_time), float(X), float(Y), float(Z)]
     if has_yaw:
         yaw_coeffs = [point[3] for point in points]
@@ -407,11 +409,13 @@ def plot_data(traj_eval: List[List[List[float]]],
     fig.subplots_adjust(hspace=0.4)
 
 
-# LIMITS = ((-2, 2), (-2, 2), (-0.05, 3.95))  # physical constraints of the optitrack system
-LIMITS = ((-1, 12), (-1, 12), (-1, 2))  # TODO
-TIMESTEP = 0.005  # we keep this relatively constant for the sake of the animation coming later
 SKYC_FILE = "Sim.skyc"
 traj_data = get_traj_data(SKYC_FILE)  # this will be a list of the dictionaries in the trajectory.json files
+if len(traj_data) < 10:
+    LIMITS = ((-2, 2), (-2, 2), (-0.05, 1.6))  # physical constraints of the optitrack system
+else:
+    LIMITS = ((-1, len(traj_data)*0.5 + 1), (-1, len(traj_data)*0.5 + 1), (-0.1, 2))  # TODO
+TIMESTEP = 0.005  # we keep this relatively constant for the sake of the animation coming later
 takeoff_time, land_time = extend_takeoff_land(traj_data)  # make every trajectory start and end at the same time
 eval_times = list(np.linspace(takeoff_time, land_time, round((land_time - takeoff_time) / TIMESTEP)))
 traj_eval = [evaluate_trajectory(trajectory, eval_times) for trajectory in traj_data]

@@ -5,7 +5,7 @@ import platform
 server = True
 demo = True
 car = False
-skybrush_client = False
+# skybrush_client = False
 sim = True
 if server:
     print(f"Starting server...")
