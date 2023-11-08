@@ -188,7 +188,7 @@ async def establish_drone_handler(stream: trio.SocketStream, *, handlers: List[D
         return
 
 uav_ids = ["04", "06", "07", "08", "09"]
-uav_ids = uav_ids + [str(i) for i in range(10, 30)]
+uav_ids = uav_ids + [str(i) for i in range(10, 99)]
 handlers: List[DroneHandler] = []
 car_streams: List[trio.SocketStream] = []
 simulation_streams: List[trio.SocketStream] = []

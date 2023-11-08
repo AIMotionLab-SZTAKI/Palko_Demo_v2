@@ -346,7 +346,6 @@ class DroneCommand:
 
 class DroneHandler:
     next_command: Union[DroneCommand, None] # which function to call next, and when it has to finish
-    sim_send: Optional[Callable]
 
     def __init__(self, socket: trio.SocketStream, drone: Drone, other_drones: List[Drone], color: str,
                  calc_semaphore: Semaphore):
@@ -373,6 +372,9 @@ class DroneHandler:
             os.remove(self.log_file_path)
         open(self.log_file_path, 'a').close()
 
+    async def sim_send(self, data):
+        pass
+
     def print(self, text):
         """Function that we can use instead of the regular pring in the context of a drone handler, to print with
         timestamp, drone annotation, and the drone's color to differentiate between drones. """
@@ -384,7 +386,8 @@ class DroneHandler:
         """Function that writes the currently memorized drone trajectory to a local file, for skyc file construction."""
         # we save the timestamp when the trajectory was saved alongside the trajectory data
         data_to_save = (display_time(), self.drone.trajectory['spline_path'], self.drone.trajectory['speed_profile'])
-        with open(os.path.join(self.traj_folder, str(self.traj_id)), 'wb') as file:
+        str_traj_id = '0'+str(self.traj_id) if self.traj_id < 10 else str(self.traj_id)
+        with open(os.path.join(self.traj_folder, str_traj_id), 'wb') as file:
             pickle.dump(data_to_save, file)
         self.traj_id += 1
 
@@ -432,8 +435,11 @@ class DroneHandler:
         await self.move_to_next_command(next_callable=self.start, duration=self.drone.fligth_time)
 
     async def _calculate(self):
-        calc_start_time = current_time()
-        self.return_to_home = display_time() > SETTINGS.get("demo_time")
+        # self.return_to_home = display_time() > SETTINGS.get("demo_time")
+        global traj_counter
+        traj_counter += 1
+        self.return_to_home = traj_counter > SETTINGS.get("max_traj")
+
         if not self.return_to_home:
             self.print(f"Got calculate command. Trajectory should start in {SETTINGS.get('REST_TIME')} sec")
         else:
@@ -442,19 +448,23 @@ class DroneHandler:
                       self.return_to_home)  # RTH will mean that the target chosen will be the home position
         self.next_command.deadline = current_time() + SETTINGS.get("REST_TIME")  # !
         self.drone.start_time = round(self.next_command.deadline, 1)  # required for trajectory calculation
+        calc_start_time = current_time()
         spline_path, speed_profile, duration, length = await async_generate_trajectory(drone=self.drone,
                                                                                        G=graph,
                                                                                        dynamic_obstacles=dynamic_obstacles,
                                                                                        other_drones=self.other_drones,
                                                                                        Ts=scene.Ts,
                                                                                        safety_distance=scene.general_safety_distance)
+        calc_end_time = current_time()
         self.drone.trajectory = {'spline_path': spline_path, 'speed_profile': speed_profile}
         self.drone.fligth_time = duration
         await trio.to_thread.run_sync(add_coll_matrix_to_elipsoids, [self.drone], graph, scene.Ts, scene.cmin,
                                       scene.cmax,
                                       scene.general_safety_distance)
+        coll_mtrx_time = current_time()
         self.trajectory = splines_to_json(spline_path, speed_profile)
-        self.print(f"Calculations took {(current_time() - calc_start_time):.3f}s.")
+        self.print(f"Calculation took {(calc_end_time-calc_start_time):.3f}s, coll_matrix took {coll_mtrx_time-calc_end_time}")
+        calc_times.append(calc_end_time-calc_start_time)
         if current_time() > self.next_command.deadline:
             self.print(f"Calculations took too long!")
             raise TimeoutError
@@ -463,7 +473,9 @@ class DroneHandler:
         """Handles the calculations regarding a new trajectory, and uploads it to the drone.
         Next command will be the start command for this trajectory."""
         # if the demo time is past, it's about time that we pick a home destination and go there in order to land
+        calc_wait_start = current_time()
         await self.calc_semaphore.wait_take(PRIORITY_LOW)
+        calc_wait_times.append(current_time() - calc_wait_start)
         await self._calculate()
         self.calc_semaphore.let_go()
         data = f"CMDSTART_upload_{self.trajectory}_EOF".encode()
@@ -936,21 +948,25 @@ async def demo(drones):
             await handler.sim_send(f"{handler.drone_ID}_".encode("utf-8") + data)
 
 # Ideally, nothing at all has to be modified anywhere else to control the demo completely. Only here.
-N = 10
+N = 30
+calc_wait_times = []
+calc_times = []
+traj_counter = 0
 SETTINGS = {
-    "real_drones": [],
-    "sim_drones": [str(i) for i in range(10, N+10)],
+    "max_traj": 200,
+    "real_drones": [str(i) for i in range(10, N+10)],
+    "sim_drones": [],
     "wait_sim_ack": True,
     # "sim_drones": ["07", "08"],
-    "random_seed": 18,
+    "random_seed": 13,
     "LIVE_DEMO": False,
     "demo_time": 40,
-    "REST_TIME": 4,
+    "REST_TIME": 3,
     "TAKEOFF_DURATION": 4,
     "absolute_traj": True,
     "real_obstacles": False,
     "measure": False,
-    "plot": True,
+    "plot": False,
     "simulated_obstacles": False,
     "SERVER_PORT": 6000,
     "DUMMY_SERVER_PORT": 7000,
@@ -1004,4 +1020,5 @@ try:
 except Exception as exc:
     print(f"Exception: {exc!r}. TRACEBACK:\n")
     print(traceback.format_exc())
+print(f"{len(calc_wait_times)} data points. Average wait time: {np.mean(calc_wait_times)} \nMaximum wait time: {np.max(calc_wait_times)} \nMinimum wait time: {np.min(calc_wait_times)}")
 input("Press Enter to exit...")

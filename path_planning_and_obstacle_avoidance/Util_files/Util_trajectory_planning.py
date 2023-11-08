@@ -1,3 +1,4 @@
+import time
 from queue import PriorityQueue
 from typing import Tuple, List
 
@@ -138,32 +139,63 @@ def summ_collision_matrices(other_drones: list, time_min: float, time_max: float
     if len(other_drones) == 0:
         return summed_coll_matrix
 
+    # make a matrix [N_T x N_E] full of zeros
     tgrid = np.arange(round(time_min/Ts), round(time_max/Ts)+1, 1)*Ts
-    zero_M = np.zeros((len(tgrid), np.shape(other_drones[0].collision_matrix_compressed)[1]-1))
+    num_edges = np.shape(other_drones[0].collision_matrix_compressed)[1]-1
+    zero_M = np.zeros((len(tgrid), num_edges)) # check a drone to get N_E
     summed_coll_matrix = np.column_stack((tgrid, zero_M))
-    for other_drone in other_drones:
-        added_coll_matrix = other_drone.collision_matrix_compressed[1:, 1:]
-        later_times = round((time_max - other_drone.collision_matrix_compressed[-1][0])/Ts)
-        if later_times < 0:
-            print(f"LATER TIMES NEGATIVE??? {later_times}")
-        if later_times: # When the obstacles finises its movement
-            one_M = np.ones((later_times, np.shape(other_drones[0].collision_matrix_compressed)[1] - 1))
-            coll_matrix_at_end = 99999999999 * one_M * other_drone.collision_matrix_compressed[-1][1:]
-            added_coll_matrix = np.row_stack((added_coll_matrix, coll_matrix_at_end))
-        # cut off the costs representing earlier time points than t_min
-        earlier_times = round((time_min - other_drone.collision_matrix_compressed[1][0])/Ts)
-        if earlier_times >= 0:
-            added_coll_matrix = added_coll_matrix[earlier_times:]
-        # during avoidance calculation it can happen that a drone is not yet started moving,
-        # therefore adding earlier cost is needed
-        else:
-            one_M = np.ones((-earlier_times, np.shape(other_drones[0].collision_matrix_compressed)[1] - 1))
-            coll_matrix_at_front = other_drone.collision_matrix_compressed[1][1:] * one_M
-            added_coll_matrix = np.row_stack((coll_matrix_at_front, added_coll_matrix))
-        summed_coll_matrix[:, 1:] = summed_coll_matrix[:, 1:]+added_coll_matrix
-    # Add edge numbers
     summed_coll_matrix = np.row_stack((other_drones[0].collision_matrix_compressed[:][0], summed_coll_matrix))
+    # to prepare for 2 edge cases where the obstacle is static within tgrid
+    one_M = zero_M+1
 
+    for other_drone in other_drones:
+
+        travel_times = other_drone.collision_matrix_compressed[1:, 0]
+        coll_matrix_of_obstacle = other_drone.collision_matrix_compressed[1:, 1:]
+        t0 = time.time()
+        # if the obstacle is will not start is movement during tgrid
+        if travel_times[0] >= tgrid[-2]: # -2 for safety ("increase" it to handle the obstale as static sooner)
+            coll_matrix_of_obstacle = one_M*(coll_matrix_of_obstacle[0, :]*1000000)
+
+        # if the obstacle already stopped its movement
+        elif travel_times[-1] <= tgrid[1]: # 1 for safety (increase it to handle the obstale as static sooner)
+            coll_matrix_of_obstacle = one_M*(coll_matrix_of_obstacle[-1, :]*1000000)
+
+        # if the obstacle moves during tgrid
+        else:
+
+            time_before_obs_start = round((time_min - travel_times[0]) / Ts)
+            time_after_obs_stop = round((time_max - travel_times[-1]) / Ts)
+
+            # fit the first lines of the coll_matrix_of_obstacle to match the tgrid
+
+            # if the obstacles started before tgrig then remove the exes rows
+            if time_before_obs_start > 0:
+                coll_matrix_of_obstacle = coll_matrix_of_obstacle[time_before_obs_start:, :]
+            # if the obstacle will start during tgrid then add extra rows to it
+            elif time_before_obs_start < 0:
+                # generate the rows
+                one_rows = np.ones((-time_before_obs_start, num_edges))
+                added_rows = one_rows*coll_matrix_of_obstacle[0, :]
+                # add rows to matrix
+                coll_matrix_of_obstacle = np.row_stack((added_rows, coll_matrix_of_obstacle))
+
+            # if the obstacles did not stop within tgrig then remove the exes rows
+            # and print a warning wich tels there is an obstacle wich movement is not fully known
+            if time_after_obs_stop < 0:
+                coll_matrix_of_obstacle = coll_matrix_of_obstacle[:time_before_obs_start, :]
+                print_WARNING("One obstacles movement is not fully taken into account during the path search.\n"
+                              "Increasing the planning time horizont is advised")
+            # if the obstacle stopped during tgrid then add extra rows to it
+            elif time_after_obs_stop > 0:
+                # generate the rows
+                one_rows = np.ones((time_after_obs_stop, num_edges))
+                added_rows = one_rows*(coll_matrix_of_obstacle[-1, :]*1000000)
+                # add rows to matrix
+                coll_matrix_of_obstacle = np.row_stack((coll_matrix_of_obstacle, added_rows))
+        t1 = time.time()
+        summed_coll_matrix[1:, 1:] = summed_coll_matrix[1:, 1:] + coll_matrix_of_obstacle
+    end = time.time()
     return summed_coll_matrix
 
 

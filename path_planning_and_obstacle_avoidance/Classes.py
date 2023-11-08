@@ -173,9 +173,9 @@ class Drone:
         # CHANGEABLE PARAMETERS:
         self.radius = 0.1
         self.DOWNWASH = 2
-        self.constant_speeds = np.array([0.4, 0.5, 0.6])
+        self.constant_speeds = 3 * np.array([0.4, 0.5, 0.6])
         self.MAX_ACCELERATION = 0.6
-        self.MAX_SPEED = 1
+        self.MAX_SPEED = 3 * 1
         self.rest_time = 3
 
         # DO NOT MODIFY IT:

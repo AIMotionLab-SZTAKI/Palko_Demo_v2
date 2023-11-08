@@ -11,7 +11,7 @@ def generate_trajectory(drone, G: dict, dynamic_obstacles, other_drones, Ts, saf
     # ==================================================================================================================
     # SUMM COLLISION MATRICES
     time_min = drone.start_time
-    time_max = time_min+45
+    time_max = time_min+30
     coll_matrix_summ = summ_collision_matrices(other_drones, time_min, time_max, Ts)
     if not len(dynamic_obstacles) == 0:
         coll_matrix_summ_obs = summ_collision_matrices(dynamic_obstacles, time_min, time_max, Ts)
@@ -30,17 +30,14 @@ def generate_trajectory(drone, G: dict, dynamic_obstacles, other_drones, Ts, saf
     spline_points = extend_route(route, G['graph'], line_buffer)
     spline = fit_spline(spline_points)
     spline_path, length = parametrize_by_path_length(spline)
-
     # ==================================================================================================================
     # DESIGN SPEED PROFILE
     speed_profile, flight_time = optimize_speed_profile(drone, other_drones, dynamic_obstacles, spline_path, length,
                                                         speed, Ts, safety_distance)
-
     # ==================================================================================================================
     # RETURN
     if flight_time is None:
         print_WARNING("DEADLOCK")
- 
     return spline_path, speed_profile, flight_time, length
 
 
